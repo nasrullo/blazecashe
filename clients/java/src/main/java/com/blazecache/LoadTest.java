@@ -139,7 +139,7 @@ public class LoadTest {
         } finally {
             // Stop peer discovery when load test completes (if enabled)
             if (strategy == CacheClient.SelectionStrategy.CONSISTENT_HASHING) {
-                client.stopDiscovery();
+                // client.stopDiscovery(); // Method not available in current implementation
             }
         }
 

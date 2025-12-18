@@ -5,7 +5,8 @@ pub mod memory_pool;
 pub mod singleflight;
 pub mod value;
 
-pub use cache::Cache;
+// Re-export the cache implementation
+pub use cache::{Cache, CacheStats};
 pub use compression::{compress, decompress, should_compress};
 pub use group::{Getter, Group, Setter};
 pub use memory_pool::MemoryPool;

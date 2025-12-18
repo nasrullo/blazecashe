@@ -57,21 +57,33 @@ impl Value {
     pub fn new(data: Vec<u8>, ttl: u64) -> Self {
         const COMPRESSION_THRESHOLD: usize = 1024; // 1KB
 
-        let (final_data, compressed) = if data.len() > COMPRESSION_THRESHOLD {
-            match lz4_flex::compress_prepend_size(&data) {
-                compressed_data => (compressed_data, true),
-            }
-        } else {
-            (data, false)
-        };
+        // OPTIMIZATION: Lazy compression - store uncompressed initially
+        // Compression will happen in background or on first access if needed
+        // This avoids blocking PUT operations with compression overhead
+        let compressed = false; // Always start uncompressed
 
         Self {
-            data: final_data,
+            data, // Store uncompressed initially
             expire: ttl,
             access_count: 1,
             last_access:current_timestamp(),
             compressed,
         }
+    }
+    
+    /// Compress the value if it's large enough and not already compressed
+    pub fn compress_if_needed(&mut self) -> Result<()> {
+        const COMPRESSION_THRESHOLD: usize = 1024; // 1KB
+        
+        if !self.compressed && self.data.len() > COMPRESSION_THRESHOLD {
+            let compressed_data = lz4_flex::compress_prepend_size(&self.data);
+            // Only compress if it actually saves space
+            if compressed_data.len() < self.data.len() {
+                self.data = compressed_data;
+                self.compressed = true;
+            }
+        }
+        Ok(())
     }
 
     /// Gets the decompressed data from this cache value.
@@ -93,6 +105,15 @@ impl Value {
     /// let data = value.get_data().unwrap();
     /// assert_eq!(data, b"test data");
     /// ```
+    pub fn is_expired(&self) -> bool {
+        if self.expire > 0 {
+            let now = current_timestamp();
+            now > self.expire
+        } else {
+            false
+        }
+    }
+
     pub fn get_data(&self) -> Result<Vec<u8>> {
         if self.compressed {
             lz4_flex::decompress_size_prepended(&self.data)

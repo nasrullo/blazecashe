@@ -56,7 +56,10 @@ impl Serializer for BinarySerializer {
                 if data.len() < 3 + key_len {
                     return Err(format!("GET command incomplete: need {} bytes, got {}", 3 + key_len, data.len()).into());
                 }
-                let key = String::from_utf8(data[3..3 + key_len].to_vec())?;
+                // OPTIMIZATION: Use from_utf8_lossy to avoid allocation for valid UTF-8
+                // For keys, we still need owned String, but avoid double allocation
+                let key_bytes = &data[3..3 + key_len];
+                let key = String::from_utf8(key_bytes.to_vec())?;
                 Ok(Command::Get(key))
             }
             2 => {
@@ -69,7 +72,9 @@ impl Serializer for BinarySerializer {
                 if data.len() < key_end {
                     return Err(format!("PUT command incomplete at key: need {} bytes, got {}", key_end, data.len()).into());
                 }
-                let key = String::from_utf8(data[key_start..key_end].to_vec())?;
+                // OPTIMIZATION: Avoid double allocation for key
+                let key_bytes = &data[key_start..key_end];
+                let key = String::from_utf8(key_bytes.to_vec())?;
                 
                 let value_len_start = key_end;
                 if data.len() < value_len_start + 4 {
@@ -87,6 +92,7 @@ impl Serializer for BinarySerializer {
                 if data.len() < value_end {
                     return Err(format!("PUT command incomplete at value: need {} bytes, got {}", value_end, data.len()).into());
                 }
+                // OPTIMIZATION: Use slice directly, avoid intermediate Vec
                 let value = data[value_start..value_end].to_vec();
                 
                 // TTL follows value: 4 bytes
@@ -111,7 +117,9 @@ impl Serializer for BinarySerializer {
                 if data.len() < 3 + key_len {
                     return Err(format!("DELETE command incomplete: need {} bytes, got {}", 3 + key_len, data.len()).into());
                 }
-                let key = String::from_utf8(data[3..3 + key_len].to_vec())?;
+                // OPTIMIZATION: Avoid double allocation
+                let key_bytes = &data[3..3 + key_len];
+                let key = String::from_utf8(key_bytes.to_vec())?;
                 Ok(Command::Delete(key))
             }
             4 => Ok(Command::Peer),

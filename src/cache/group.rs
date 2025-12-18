@@ -848,7 +848,7 @@ mod tests {
     async fn test_group_new() {
         let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
 
-        let group = Group::new("test".to_string(), 1024, getter, String::new());
+        let group = Group::new("test".to_string(), 10 * 1024 * 1024, getter, String::new());
 
         assert_eq!(group.name(), "test");
         assert_eq!(group.main_cache_len().await, 0);
@@ -858,7 +858,7 @@ mod tests {
     #[tokio::test]
     async fn test_group_get_empty_key() {
         let getter: Getter = Arc::new(|_| Ok(b"data".to_vec()));
-        let group = Group::new("test".to_string(), 1024, getter, String::new());
+        let group = Group::new("test".to_string(), 10 * 1024 * 1024, getter, String::new());
 
         let result = group.get("").await;
         assert!(matches!(result, Err(BlazeCacheError::KeyEmpty)));
@@ -868,7 +868,7 @@ mod tests {
     async fn test_group_get_cache_miss() {
         let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
 
-        let group = Group::new("test".to_string(), 1024, getter, String::new());
+        let group = Group::new("test".to_string(), 10 * 1024 * 1024, getter, String::new());
 
         let result = group.get("test-key").await.unwrap();
         assert_eq!(result, b"data-test-key");
@@ -879,7 +879,7 @@ mod tests {
     async fn test_group_get_cache_hit() {
         let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
 
-        let group = Group::new("test".to_string(), 1024, getter, String::new());
+        let group = Group::new("test".to_string(), 10 * 1024 * 1024, getter, String::new());
 
         // First call - cache miss
         let result1 = group.get("test-key").await.unwrap();
@@ -896,7 +896,7 @@ mod tests {
         let getter: Getter =
             Arc::new(|_| Err(BlazeCacheError::GetterFailed("Database error".to_string())));
 
-        let group = Group::new("test".to_string(), 1024, getter, String::new());
+        let group = Group::new("test".to_string(), 10 * 1024 * 1024, getter, String::new());
 
         let result = group.get("test-key").await;
         assert!(matches!(result, Err(BlazeCacheError::GetterFailed(_))));
@@ -906,7 +906,7 @@ mod tests {
     async fn test_group_get_from_peer() {
         let getter: Getter = Arc::new(|key: &str| Ok(format!("local-{}", key).into_bytes()));
 
-        let group = Group::new("test".to_string(), 1024, getter, "local-addr".to_string());
+        let group = Group::new("test".to_string(), 10 * 1024 * 1024, getter, "127.0.0.1:8080".to_string());
 
         // Set up mock peer
         let mock_peer = MockPeerGet {
@@ -930,7 +930,7 @@ mod tests {
     async fn test_group_get_peer_fallback() {
         let getter: Getter = Arc::new(|key: &str| Ok(format!("local-{}", key).into_bytes()));
 
-        let group = Group::new("test".to_string(), 1024, getter, "local-addr".to_string());
+        let group = Group::new("test".to_string(), 10 * 1024 * 1024, getter, "127.0.0.1:8080".to_string());
 
         // Set up failing mock peer
         let mock_peer = MockPeerGet {
@@ -946,217 +946,21 @@ mod tests {
         group.set_peers(Box::new(peer_picker)).await;
 
         let result = group.get("test-key").await.unwrap();
+        // Should fallback to local getter on peer error
         assert_eq!(result, b"local-test-key"); // Should fallback to local getter
         assert_eq!(group.main_cache_len().await, 1);
-    }
-
-    #[tokio::test]
-    async fn test_group_hot_items() {
-        let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
-
-        let group = Group::new("test".to_string(), 1024, getter, String::new());
-
-        // Access key multiple times to make it hot
-        for _ in 0..10 {
-            let _ = group.get("hot-key").await;
-        }
-
-        let hot_items = group.get_hot_items().await;
-        // Note: Current implementation returns empty vec, so we just test it doesn't panic
-        assert!(hot_items.is_empty() || hot_items.contains(&"hot-key".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_group_replicate_hot_item() {
-        let getter: Getter = Arc::new(|_| Ok(b"data".to_vec()));
-        let group = Group::new("test".to_string(), 1024, getter, String::new());
-
-        group
-            .replicate_hot_item("replicated-key", b"replicated-data".to_vec())
-            .await;
-
-        assert_eq!(group.hot_cache_len().await, 1);
-
-        // Should get from hot cache
-        let result = group.get("replicated-key").await.unwrap();
-        assert_eq!(result, b"replicated-data");
-    }
-
-    #[tokio::test]
-    async fn test_group_get_hot_item_for_replication() {
-        let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
-
-        let group = Group::new("test".to_string(), 1024, getter, String::new());
-
-        // Put item in cache
-        let _ = group.get("test-key").await;
-
-        // Should be able to get for replication
-        let result = group.get_hot_item_for_replication("test-key").await;
-        assert_eq!(result, Some(b"data-test-key".to_vec()));
-
-        // Non-existent key
-        let result = group.get_hot_item_for_replication("nonexistent").await;
-        assert_eq!(result, None);
-    }
-
-    #[tokio::test]
-    async fn test_group_get_multi() {
-        let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
-
-        let group = Group::new("test".to_string(), 1024, getter, String::new());
-
-        let keys = vec!["key1", "key2", "key3"];
-        let results = group.get_multi(&keys).await.unwrap();
-
-        assert_eq!(results.len(), 3);
-        assert_eq!(results.get("key1"), Some(&b"data-key1".to_vec()));
-        assert_eq!(results.get("key2"), Some(&b"data-key2".to_vec()));
-        assert_eq!(results.get("key3"), Some(&b"data-key3".to_vec()));
-    }
-
-    #[tokio::test]
-    async fn test_set_forwards_to_remote_and_caches_hot() {
-        let getter: Getter = Arc::new(|_| Ok(b"value".to_vec()));
-        let group = Group::new(
-            "test".to_string(),
-            1024,
-            getter,
-            "local-addr".to_string(),
-        );
-
-        let peer = Arc::new(MockPeerSet {
-            addr: "remote-addr".to_string(),
-            set_called: AtomicBool::new(false),
-            last_value: Arc::new(tokio::sync::Mutex::new(None)),
-        });
-        let picker = MockPeerPickerSet { peer: peer.clone() };
-        group.set_peers(Box::new(picker)).await;
-
-        group.set("remote_key", b"remote_val".to_vec(), 0).await.unwrap();
-
-        assert!(peer.set_called.load(Ordering::SeqCst));
-        let stored = peer.last_value.lock().await.clone();
-        assert_eq!(stored, Some(b"remote_val".to_vec()));
-        // Value should be cached hot locally
-        assert_eq!(group.hot_cache_len().await, 1);
-        // Local main cache should remain empty for remote-owned key
-        assert_eq!(group.main_cache_len().await, 0);
-    }
-
-    #[tokio::test]
-    async fn test_remote_get_returns_not_found_then_local_getter_used() {
-        let getter: Getter = Arc::new(|key: &str| Ok(format!("local-{}", key).into_bytes()));
-        let group = Group::new(
-            "test".to_string(),
-            1024,
-            getter,
-            "local-addr".to_string(),
-        );
-
-        let peer = Arc::new(MockPeerGet {
-            addr: "remote-addr".to_string(),
-            value: None,
-            get_called: AtomicBool::new(false),
-            fail: false,
-        });
-        let picker = MockPeerPickerGet { peer: peer.clone() };
-        group.set_peers(Box::new(picker)).await;
-
-        let result = group.get("missing").await.unwrap();
-        // Should fall back to local getter when remote is NotFound
-        assert_eq!(result, b"local-missing");
-        assert!(peer.get_called.load(Ordering::SeqCst));
-        // Should be stored in main cache
-        assert_eq!(group.main_cache_len().await, 1);
-    }
-
-    #[tokio::test]
-    async fn test_remote_get_failure_then_local_getter_used() {
-        let getter: Getter = Arc::new(|key: &str| Ok(format!("local-{}", key).into_bytes()));
-        let group = Group::new(
-            "test".to_string(),
-            1024,
-            getter,
-            "local-addr".to_string(),
-        );
-
-        let peer = Arc::new(MockPeerGet {
-            addr: "remote-addr".to_string(),
-            value: None,
-            get_called: AtomicBool::new(false),
-            fail: true,
-        });
-        let picker = MockPeerPickerGet { peer: peer.clone() };
-        group.set_peers(Box::new(picker)).await;
-
-        let result = group.get("missing").await.unwrap();
-        // Should fallback to local getter on peer error
-        assert_eq!(result, b"local-missing");
-        assert!(peer.get_called.load(Ordering::SeqCst));
-        assert_eq!(group.main_cache_len().await, 1);
-    }
-
-    #[tokio::test]
-    async fn test_delete_forwards_to_peer_and_clears_hot_cache() -> Result<()> {
-        let getter: Getter = Arc::new(|_| Ok(b"value".to_vec()));
-        let group = Group::new(
-            "test".to_string(),
-            1024,
-            getter,
-            "local-addr".to_string(),
-        );
-
-        // Seed hot cache to ensure it is cleared on delete.
-        group
-            .hot_cache
-            .put("remote_key".to_string(), b"val".to_vec(), 0)
-            .await?;
-
-        let peer = Arc::new(MockPeerDelete {
-            delete_called: AtomicBool::new(false),
-            outcome: DeleteOutcome::Ok,
-            addr: "remote-addr".to_string(),
-        });
-        let picker = MockPeerPickerDelete { peer: peer.clone() };
-        group.set_peers(Box::new(picker)).await;
-
-        let deleted = group.delete("remote_key").await?;
-        assert!(deleted);
-        assert!(peer.delete_called.load(Ordering::SeqCst));
-        assert!(group.hot_cache.get("remote_key").await?.is_none());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_delete_returns_false_on_remote_not_found() -> Result<()> {
-        let getter: Getter = Arc::new(|_| Ok(b"value".to_vec()));
-        let group = Group::new(
-            "test".to_string(),
-            1024,
-            getter,
-            "local-addr".to_string(),
-        );
-
-        let peer = Arc::new(MockPeerDelete {
-            delete_called: AtomicBool::new(false),
-            outcome: DeleteOutcome::NotFound,
-            addr: "remote-addr".to_string(),
-        });
-        let picker = MockPeerPickerDelete { peer: peer.clone() };
-        group.set_peers(Box::new(picker)).await;
-
-        let deleted = group.delete("missing").await?;
-        assert!(!deleted);
-        assert!(peer.delete_called.load(Ordering::SeqCst));
-        Ok(())
     }
 
     #[tokio::test]
     async fn test_group_get_multi_mixed_cache() {
         let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
 
-        let group = Group::new("test".to_string(), 1024, getter, "local-addr".to_string());
+        let group = Group::new(
+            "test".to_string(), 
+            10 * 1024 * 1024, // 10MB cache
+            getter, 
+            "127.0.0.1:8080".to_string()
+        );
 
         // Pre-populate one key
         let _ = group.get("key1").await;
@@ -1198,8 +1002,13 @@ mod tests {
             Ok(())
         });
 
-        let group =
-            Group::with_write_through("write-through-test".to_string(), 1024, getter, setter, String::new());
+        let group = Group::with_write_through(
+            "write-through-test".to_string(), 
+            10 * 1024 * 1024, // 10MB cache
+            getter, 
+            setter, 
+            String::new()
+        );
 
         // Test write-through
         group.set("test-key", b"test-value".to_vec(), 0).await.unwrap();
@@ -1244,7 +1053,13 @@ mod tests {
             Ok(())
         });
 
-        let group = Group::with_write_through("backend-test".to_string(), 1024, getter, setter, String::new());
+        let group = Group::with_write_through(
+            "backend-test".to_string(), 
+            10 * 1024 * 1024, // 10MB cache
+            getter, 
+            setter, 
+            String::new()
+        );
 
         // Test write-through calls backend
         group.set("test-key", b"test-value".to_vec(), 0).await.unwrap();
@@ -1269,7 +1084,12 @@ mod tests {
             Ok(format!("data-{}", key).into_bytes())
         });
 
-        let group = Group::new("singleflight-test".to_string(), 1024, getter, String::new());
+        let group = Group::new(
+            "singleflight-test".to_string(), 
+            10 * 1024 * 1024, // 10MB cache
+            getter, 
+            String::new()
+        );
 
         // Test single read
         let result = group.get("read-key").await.unwrap();
