@@ -55,8 +55,6 @@ impl Value {
     /// assert!(!value.compressed); // Small data isn't compressed
     /// ```
     pub fn new(data: Vec<u8>, ttl: u64) -> Self {
-        const COMPRESSION_THRESHOLD: usize = 1024; // 1KB
-
         // OPTIMIZATION: Lazy compression - store uncompressed initially
         // Compression will happen in background or on first access if needed
         // This avoids blocking PUT operations with compression overhead

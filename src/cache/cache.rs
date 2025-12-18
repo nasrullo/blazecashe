@@ -66,6 +66,7 @@ struct AtomicCacheStats {
     puts: AtomicUsize,
     deletes: AtomicUsize,
     evictions: AtomicUsize,
+    #[allow(dead_code)] // Reserved for future hot item tracking
     hot_items: AtomicUsize,
     rejected_items: AtomicUsize,
     ttl_evictions: AtomicUsize,
@@ -90,6 +91,7 @@ impl AtomicCacheStats {
         }
     }
     
+    #[allow(dead_code)] // Reserved for future use
     fn to_cache_stats(&self) -> CacheStats {
         CacheStats {
             hits: self.hits.load(Ordering::Relaxed) as u64,
@@ -187,9 +189,8 @@ impl Cache {
     /// Manually trigger cleanup of expired items
     pub async fn cleanup_expired(&self) -> usize {
         let now = current_timestamp();
-        let mut removed = 0;
         
-        {
+        let removed = {
             let mut data = self.data.write();
             let mut keys_to_remove = Vec::new();
             
@@ -201,11 +202,12 @@ impl Cache {
             }
             
             // Remove expired keys
-            removed = keys_to_remove.len();
+            let count = keys_to_remove.len();
             for key in keys_to_remove {
                 data.pop(&key);
             }
-        }
+            count
+        };
         
         if removed > 0 {
             // OPTIMIZATION: Use atomic increment
