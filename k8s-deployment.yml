@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blazecache
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: blazecache
+  template:
+    metadata:
+      labels:
+        app: blazecache
+    spec:
+      containers:
+      - name: blazecache
+        image: blazecache:latest
+        ports:
+        - containerPort: 6784
+        env:
+        - name: PORT
+          value: "6784"
+        - name: BLAZECACHE_MAX_MEMORY
+          value: "268435456"
+        livenessProbe:
+          tcpSocket:
+            port: 6784
+          initialDelaySeconds: 30
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blazecache-service
+spec:
+  selector:
+    app: blazecache
+  ports:
+  - port: 6784
+    targetPort: 6784
+  type: LoadBalancer

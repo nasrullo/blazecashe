@@ -1,0 +1,23 @@
+[Unit]
+Description=BlazeCache - High-performance cache server
+After=network.target
+
+[Service]
+Type=simple
+User=blazecache
+Group=blazecache
+ExecStart=/usr/local/bin/blazecache -p 6784 -m 64
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/blazecache
+
+[Install]
+WantedBy=multi-user.target

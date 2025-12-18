@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'blazecache-cluster'
+    static_configs:
+      - targets:
+        - 'blazecache-1:9090'
+        - 'blazecache-2:9090'
+        - 'blazecache-3:9090'
+        - 'blazecache-4:9090'
+        - 'blazecache-5:9090'
+        - 'blazecache-6:9090'
+        - 'blazecache-7:9090'
+        - 'blazecache-8:9090'
+        - 'blazecache-9:9090'
+        - 'blazecache-10:9090'
+    scrape_interval: 5s
+    metrics_path: /metrics
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

@@ -1,0 +1,16 @@
+FROM rust:latest as builder
+
+WORKDIR /app
+COPY . .
+RUN cargo build --release --example hot_cache_client
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/examples/hot_cache_client /usr/local/bin/test-client
+
+# Wait for servers to start, then run tests
+CMD ["sh", "-c", "sleep 10 && test-client"]

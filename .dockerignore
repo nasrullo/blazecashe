@@ -1,0 +1,44 @@
+# Rust build artifacts
+target/
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+!README.md
+
+# Docker files (don't need in image)
+docker/
+*.yml
+*.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+tests/
+# Note: benches/ is needed for Cargo.toml validation, but we don't run benchmarks
+
+# Client libraries (not needed in server image)
+clients/
+
+# Examples (not needed in server image)
+examples/
+
+# Cache data
+cache_data/
+
+# Other
+*.log
+*.tmp
+

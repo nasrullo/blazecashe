@@ -1,0 +1,8 @@
+com/blazecache/CacheClient$SelectionStrategy.class
+com/blazecache/LoadTest.class
+com/blazecache/TestSinglePut.class
+com/blazecache/CacheClient$ConsistentHashRing$HashEntry.class
+com/blazecache/CacheClient$ConsistentHashRing.class
+com/blazecache/CacheClient$ResponseData.class
+com/blazecache/CacheClient.class
+com/blazecache/TestClient.class

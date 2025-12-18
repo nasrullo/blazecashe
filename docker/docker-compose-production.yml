@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  blazecache-1:
+    build: .
+    container_name: blazecache-1
+    ports:
+      - "8081:8080"
+    environment:
+      - BLAZECACHE_MAX_MEMORY=1073741824  # 1GB
+      - BLAZECACHE_BIND_ADDR=0.0.0.0:8080
+      - PORT=8080
+    networks:
+      - blazecache-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+          cpus: '1.0'
+
+  blazecache-2:
+    build: .
+    container_name: blazecache-2
+    ports:
+      - "8082:8080"
+    environment:
+      - BLAZECACHE_MAX_MEMORY=1073741824  # 1GB
+      - BLAZECACHE_BIND_ADDR=0.0.0.0:8080
+      - PORT=8080
+    networks:
+      - blazecache-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+          cpus: '1.0'
+
+  blazecache-3:
+    build: .
+    container_name: blazecache-3
+    ports:
+      - "8083:8080"
+    environment:
+      - BLAZECACHE_MAX_MEMORY=1073741824  # 1GB
+      - BLAZECACHE_BIND_ADDR=0.0.0.0:8080
+      - PORT=8080
+    networks:
+      - blazecache-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+          cpus: '1.0'
+
+  # Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: blazecache-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - blazecache-network
+    restart: unless-stopped
+
+networks:
+  blazecache-network:
+    driver: bridge

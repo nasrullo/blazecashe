@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  blazecache-1:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile.hot-cache
+    container_name: blazecache-hot-1
+    ports:
+      - "8081:8080"
+    environment:
+      - NODE_ID=node1
+      - PORT=8080
+      - BLAZECACHE_MAX_MEMORY=134217728  # 128MB
+    networks:
+      - hot-cache-network
+    restart: unless-stopped
+
+  blazecache-2:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile.hot-cache
+    container_name: blazecache-hot-2
+    ports:
+      - "8082:8080"
+    environment:
+      - NODE_ID=node2
+      - PORT=8080
+      - BLAZECACHE_MAX_MEMORY=134217728  # 128MB
+    networks:
+      - hot-cache-network
+    restart: unless-stopped
+
+  blazecache-3:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile.hot-cache
+    container_name: blazecache-hot-3
+    ports:
+      - "8083:8080"
+    environment:
+      - NODE_ID=node3
+      - PORT=8080
+      - BLAZECACHE_MAX_MEMORY=134217728  # 128MB
+    networks:
+      - hot-cache-network
+    restart: unless-stopped
+
+  # Test client that runs hot cache tests
+  test-client:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile.hot-cache-client
+    container_name: hot-cache-tester
+    depends_on:
+      - blazecache-1
+      - blazecache-2
+      - blazecache-3
+    environment:
+      - DOCKER_ENV=1
+    networks:
+      - hot-cache-network
+    profiles:
+      - test
+
+networks:
+  hot-cache-network:
+    driver: bridge

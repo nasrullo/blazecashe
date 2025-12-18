@@ -1,0 +1,11 @@
+[package]
+name = "blazecache-client"
+version = "0.1.0"
+edition = "2021"
+description = "BlazeCache client library for Rust"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+blazecache = { path = "../../" }
+fnv = "1.0"
