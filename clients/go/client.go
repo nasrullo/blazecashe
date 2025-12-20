@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 var (
@@ -28,16 +29,29 @@ const (
 	ConsistentHashing
 )
 
+// serverSelection is a snapshot used for lock-free reads
+type serverSelection struct {
+	strategy SelectionStrategy
+	servers  []string
+	hashRing *consistentHashRing
+}
+
 type Client struct {
 	servers     []string
 	strategy    SelectionStrategy
 	counter     uint64
 	timeout     time.Duration
 	hashRing    *consistentHashRing
-	mu          sync.RWMutex
+	mu          sync.RWMutex // Only for writes (WithStrategy, refreshPeers)
 	seed        string        // for discovery mode
 	refreshSecs int           // for discovery mode
 	stopRefresh chan struct{} // to stop the refresh goroutine
+	// Connection pooling (optimized for high throughput - lock-free reads)
+	connectionPool *sync.Map                // server -> chan net.Conn (lock-free reads)
+	poolCounts     *sync.Map                // server -> *int32 (lock-free reads)
+	maxPoolSize    int                      // maximum connections per server
+	// Lock-free reads using RCU pattern
+	selection unsafe.Pointer // atomic pointer to *serverSelection
 }
 
 type consistentHashRing struct {
@@ -52,25 +66,48 @@ type Item struct {
 	Value []byte
 }
 
+const (
+	maxPoolSize       = 500 // Maximum connections per server (increased for high concurrency)
+	connectionTimeout = 5 * time.Second
+)
+
 func New(servers ...string) (*Client, error) {
 	if len(servers) == 0 {
 		return nil, errors.New("at least one server required")
 	}
 
 	c := &Client{
-		servers:  servers,
-		strategy: RoundRobin,
-		timeout:  5 * time.Second,
+		servers:        servers,
+		strategy:       RoundRobin,
+		timeout:        5 * time.Second,
+		connectionPool: &sync.Map{},
+		poolCounts:     &sync.Map{},
+		maxPoolSize:    maxPoolSize,
 	}
 	c.rebuildHashRing()
+	// Initialize lock-free selection snapshot
+	c.updateSelectionSnapshot()
 	return c, nil
+}
+
+func (c *Client) updateSelectionSnapshot() {
+	// Create a new snapshot with current values
+	snapshot := &serverSelection{
+		strategy: c.strategy,
+		servers:  make([]string, len(c.servers)),
+		hashRing: c.hashRing,
+	}
+	copy(snapshot.servers, c.servers)
+	// Atomically update the pointer
+	atomic.StorePointer(&c.selection, unsafe.Pointer(snapshot))
 }
 
 func (c *Client) WithStrategy(strategy SelectionStrategy, weights ...uint32) *Client {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.strategy = strategy
 	c.rebuildHashRing()
+	c.updateSelectionSnapshot()
+	c.mu.Unlock()
 	return c
 }
 
@@ -87,12 +124,15 @@ func WithDiscovery(seed string, refreshSecs int) (*Client, error) {
 	}
 
 	c := &Client{
-		servers:     []string{seed},
-		strategy:    ConsistentHashing,
-		timeout:     5 * time.Second,
-		seed:        seed,
-		refreshSecs: refreshSecs,
-		stopRefresh: make(chan struct{}),
+		servers:        []string{seed},
+		strategy:       ConsistentHashing,
+		timeout:        5 * time.Second,
+		seed:           seed,
+		refreshSecs:    refreshSecs,
+		stopRefresh:    make(chan struct{}),
+		connectionPool: &sync.Map{},
+		poolCounts:     &sync.Map{},
+		maxPoolSize:    maxPoolSize,
 	}
 	c.rebuildHashRing()
 
@@ -164,6 +204,7 @@ func (c *Client) refreshPeers() error {
 		c.mu.Lock()
 		c.servers = peers
 		c.rebuildHashRing()
+		c.updateSelectionSnapshot()
 		c.mu.Unlock()
 	}
 
@@ -176,22 +217,37 @@ func encodePeer() []byte {
 }
 
 func (c *Client) selectServer(key string) string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	// Lock-free read using RCU pattern
+	selectionPtr := (*serverSelection)(atomic.LoadPointer(&c.selection))
+	
+	if selectionPtr == nil {
+		// Fallback to locked read if snapshot not initialized
+		c.mu.RLock()
+		strategy := c.strategy
+		servers := c.servers
+		hashRing := c.hashRing
+		c.mu.RUnlock()
+		return c.selectServerWithValues(key, strategy, servers, hashRing)
+	}
+	
+	// Use snapshot values (no lock needed)
+	return c.selectServerWithValues(key, selectionPtr.strategy, selectionPtr.servers, selectionPtr.hashRing)
+}
 
-	switch c.strategy {
+func (c *Client) selectServerWithValues(key string, strategy SelectionStrategy, servers []string, hashRing *consistentHashRing) string {
+	switch strategy {
 	case RoundRobin:
-		index := (atomic.AddUint64(&c.counter, 1) - 1) % uint64(len(c.servers))
-		return c.servers[index]
+		index := (atomic.AddUint64(&c.counter, 1) - 1) % uint64(len(servers))
+		return servers[index]
 	case ConsistentHashing:
-		if c.hashRing == nil || len(c.hashRing.sortedHashes) == 0 {
+		if hashRing == nil || len(hashRing.sortedHashes) == 0 {
 			// Fallback to round robin if ring is empty
-			index := (atomic.AddUint64(&c.counter, 1) - 1) % uint64(len(c.servers))
-			return c.servers[index]
+			index := (atomic.AddUint64(&c.counter, 1) - 1) % uint64(len(servers))
+			return servers[index]
 		}
-		return c.hashRing.pickServer(key)
+		return hashRing.pickServer(key)
 	default:
-		return c.servers[0]
+		return servers[0]
 	}
 }
 
@@ -270,23 +326,181 @@ func fnvHash64(input string) uint64 {
 	return h.Sum64()
 }
 
+// getOrCreateConnection gets a connection from the pool or creates a new one
+// Uses Go's channel-based pattern for efficient connection reuse
+// Optimized with sync.Map for lock-free reads
+func (c *Client) getOrCreateConnection(server string) (net.Conn, error) {
+	// Fast path: lock-free read using sync.Map
+	poolChanVal, exists := c.connectionPool.Load(server)
+	var poolChan chan net.Conn
+	var poolCount *int32
+	
+	if !exists {
+		// Initialize pool for this server (only happens once per server)
+		poolChan = make(chan net.Conn, c.maxPoolSize)
+		count := int32(0)
+		poolCount = &count
+		
+		// Use LoadOrStore to ensure only one goroutine initializes
+		actualChan, _ := c.connectionPool.LoadOrStore(server, poolChan)
+		poolChan = actualChan.(chan net.Conn)
+		
+		actualCount, _ := c.poolCounts.LoadOrStore(server, poolCount)
+		poolCount = actualCount.(*int32)
+	} else {
+		poolChan = poolChanVal.(chan net.Conn)
+		if countVal, ok := c.poolCounts.Load(server); ok {
+			poolCount = countVal.(*int32)
+		} else {
+			// Shouldn't happen, but handle it
+			count := int32(0)
+			poolCount = &count
+			c.poolCounts.Store(server, poolCount)
+		}
+	}
+
+	// Try to get a connection from the channel (non-blocking)
+	select {
+	case conn := <-poolChan:
+		// Got a connection from the pool - return it immediately
+		return conn, nil
+	default:
+		// No connection available, check if we can create a new one
+		currentCount := atomic.LoadInt32(poolCount)
+		if currentCount < int32(c.maxPoolSize) {
+			// Try to increment the counter atomically
+			if atomic.CompareAndSwapInt32(poolCount, currentCount, currentCount+1) {
+				// Successfully claimed a slot, create new connection
+				conn, err := net.DialTimeout("tcp", server, connectionTimeout)
+				if err != nil {
+					// Failed to create, decrement counter
+					atomic.AddInt32(poolCount, -1)
+					return nil, err
+				}
+				// Optimize TCP settings for low latency
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					tcpConn.SetNoDelay(true) // Disable Nagle's algorithm for low latency
+				}
+				return conn, nil
+			}
+			// CAS failed, another goroutine got it - try channel again
+			select {
+			case conn := <-poolChan:
+				return conn, nil
+			default:
+				// Still nothing, create new connection (allow overflow)
+				conn, err := net.DialTimeout("tcp", server, connectionTimeout)
+				if err != nil {
+					return nil, err
+				}
+				// Optimize TCP settings for low latency
+				if tcpConn, ok := conn.(*net.TCPConn); ok {
+					tcpConn.SetNoDelay(true) // Disable Nagle's algorithm for low latency
+				}
+				atomic.AddInt32(poolCount, 1)
+				return conn, nil
+			}
+		}
+		
+		// Pool is at max size, try channel one more time (non-blocking)
+		select {
+		case conn := <-poolChan:
+			return conn, nil
+		default:
+			// Still no connection available, create new one (allow overflow to prevent blocking)
+			conn, err := net.DialTimeout("tcp", server, connectionTimeout)
+			if err != nil {
+				return nil, err
+			}
+			// Optimize TCP settings for low latency
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				tcpConn.SetNoDelay(true) // Disable Nagle's algorithm for low latency
+			}
+			atomic.AddInt32(poolCount, 1)
+			return conn, nil
+		}
+	}
+}
+
+// returnConnection returns a connection to the pool
+// Uses channels for efficient goroutine synchronization (lock-free)
+func (c *Client) returnConnection(server string, conn net.Conn) {
+	if conn == nil {
+		return
+	}
+
+	// Lock-free read using sync.Map
+	poolChanVal, exists := c.connectionPool.Load(server)
+	if !exists {
+		// Pool doesn't exist, just close the connection
+		conn.Close()
+		return
+	}
+
+	poolChan := poolChanVal.(chan net.Conn)
+
+	// Try non-blocking send first (fast path)
+	select {
+	case poolChan <- conn:
+		// Successfully returned to pool (lock-free)
+		return
+	default:
+		// Channel full, try with brief timeout to avoid dropping connections
+		select {
+		case poolChan <- conn:
+			// Successfully returned to pool
+			return
+		case <-time.After(1 * time.Millisecond):
+			// Timeout - pool is truly full, close connection
+			conn.Close()
+			// Decrement counter atomically (lock-free)
+			if poolCountVal, ok := c.poolCounts.Load(server); ok {
+				poolCount := poolCountVal.(*int32)
+				atomic.AddInt32(poolCount, -1)
+			}
+		}
+	}
+}
+
+// markConnectionDead marks a connection as dead and decrements the pool count
+func (c *Client) markConnectionDead(server string) {
+	// Lock-free read using sync.Map
+	if poolCountVal, ok := c.poolCounts.Load(server); ok {
+		poolCount := poolCountVal.(*int32)
+		atomic.AddInt32(poolCount, -1)
+	}
+}
+
 func (c *Client) Get(key string) (*Item, error) {
 	server := c.selectServer(key)
 
-	conn, err := net.DialTimeout("tcp", server, c.timeout)
+	conn, err := c.getOrCreateConnection(server)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	// Track if we should return connection (set to false on error)
+	shouldReturn := true
+	defer func() {
+		if shouldReturn && conn != nil {
+			c.returnConnection(server, conn)
+		} else if conn != nil {
+			// Connection was closed due to error, just mark as dead
+			c.markConnectionDead(server)
+		}
+	}()
 
 	request := encodeRequest(0x01, key, nil)
 	if _, err := conn.Write(request); err != nil {
+		conn.Close()
+		shouldReturn = false
 		return nil, err
 	}
 
 	// Read status byte
 	statusBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, statusBuf); err != nil {
+		conn.Close()
+		shouldReturn = false
 		return nil, err
 	}
 	status := statusBuf[0]
@@ -295,27 +509,36 @@ func (c *Client) Get(key string) (*Item, error) {
 	case 0x00: // OK - read data length and data
 		var dataLen uint32
 		if err := binary.Read(conn, binary.BigEndian, &dataLen); err != nil {
+			conn.Close()
+			shouldReturn = false
 			return nil, err
 		}
 		var data []byte
 		if dataLen > 0 {
 			data = make([]byte, dataLen)
 			if _, err := io.ReadFull(conn, data); err != nil {
+				conn.Close()
+				shouldReturn = false
 				return nil, err
 			}
 		}
+		// Success - connection will be returned to pool by defer
 		return &Item{Key: key, Value: data}, nil
 	case 0x01: // ERROR - read message length and message
 		var msgLen uint16
 		if err := binary.Read(conn, binary.BigEndian, &msgLen); err != nil {
+			conn.Close()
+			shouldReturn = false
 			return nil, err
 		}
 		if msgLen > 0 {
 			msgBytes := make([]byte, msgLen)
 			if _, err := io.ReadFull(conn, msgBytes); err != nil {
+				conn.Close()
+				shouldReturn = false
 				return nil, err
 			}
-			// Check if it's "not found" error
+			// Check if it's "not found" error - connection is still good, will be returned by defer
 			if strings.Contains(strings.ToLower(string(msgBytes)), "not found") {
 				return nil, ErrNotFound
 			}
@@ -323,6 +546,8 @@ func (c *Client) Get(key string) (*Item, error) {
 		}
 		return nil, ErrNotFound
 	default:
+		conn.Close()
+		shouldReturn = false
 		return nil, fmt.Errorf("unknown status: %d", status)
 	}
 }
@@ -330,20 +555,32 @@ func (c *Client) Get(key string) (*Item, error) {
 func (c *Client) Set(item *Item) error {
 	server := c.selectServer(item.Key)
 
-	conn, err := net.DialTimeout("tcp", server, c.timeout)
+	conn, err := c.getOrCreateConnection(server)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	// Track if we should return connection (set to false on error)
+	shouldReturn := true
+	defer func() {
+		if shouldReturn && conn != nil {
+			c.returnConnection(server, conn)
+		}
+	}()
 
 	request := encodeRequest(0x02, item.Key, item.Value)
 	if _, err := conn.Write(request); err != nil {
+		conn.Close()
+		c.markConnectionDead(server)
+		shouldReturn = false
 		return err
 	}
 
 	// Read status byte
 	statusBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, statusBuf); err != nil {
+		conn.Close()
+		c.markConnectionDead(server)
+		shouldReturn = false
 		return err
 	}
 	status := statusBuf[0]
@@ -352,49 +589,72 @@ func (c *Client) Set(item *Item) error {
 		// OK response - read data length (should be 0 for PUT success)
 		var dataLen uint32
 		if err := binary.Read(conn, binary.BigEndian, &dataLen); err != nil {
+			conn.Close()
+			shouldReturn = false
 			return err
 		}
 		if dataLen > 0 {
 			// Read and discard data
 			discard := make([]byte, dataLen)
-			io.ReadFull(conn, discard)
+			if _, err := io.ReadFull(conn, discard); err != nil {
+				conn.Close()
+				shouldReturn = false
+				return err
+			}
 		}
+		// Success - connection will be returned by defer
 		return nil
 	} else if status == 0x01 {
-		// ERROR - read message
+		// ERROR - read message (connection is still good for protocol errors)
 		var msgLen uint16
 		if err := binary.Read(conn, binary.BigEndian, &msgLen); err != nil {
+			conn.Close()
+			shouldReturn = false
 			return err
 		}
 		if msgLen > 0 {
 			msgBytes := make([]byte, msgLen)
 			if _, err := io.ReadFull(conn, msgBytes); err != nil {
+				conn.Close()
+				shouldReturn = false
 				return err
 			}
 			return errors.New("set failed: " + string(msgBytes))
 		}
 		return errors.New("set failed")
 	}
+	conn.Close()
+	shouldReturn = false
 	return fmt.Errorf("unexpected status: %d", status)
 }
 
 func (c *Client) Delete(key string) error {
 	server := c.selectServer(key)
 
-	conn, err := net.DialTimeout("tcp", server, c.timeout)
+	conn, err := c.getOrCreateConnection(server)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	// Track if we should return connection (set to false on error)
+	shouldReturn := true
+	defer func() {
+		if shouldReturn && conn != nil {
+			c.returnConnection(server, conn)
+		}
+	}()
 
 	request := encodeRequest(0x03, key, nil)
 	if _, err := conn.Write(request); err != nil {
+		conn.Close()
+		shouldReturn = false
 		return err
 	}
 
 	// Read status byte
 	statusBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, statusBuf); err != nil {
+		conn.Close()
+		shouldReturn = false
 		return err
 	}
 	status := statusBuf[0]
@@ -404,22 +664,33 @@ func (c *Client) Delete(key string) error {
 		// OK - read data length (should be 0)
 		var dataLen uint32
 		if err := binary.Read(conn, binary.BigEndian, &dataLen); err != nil {
+			conn.Close()
+			shouldReturn = false
 			return err
 		}
 		if dataLen > 0 {
 			discard := make([]byte, dataLen)
-			io.ReadFull(conn, discard)
+			if _, err := io.ReadFull(conn, discard); err != nil {
+				conn.Close()
+				shouldReturn = false
+				return err
+			}
 		}
+		// Success - connection will be returned by defer
 		return nil
 	case 0x01:
-		// ERROR - check if it's "not found"
+		// ERROR - check if it's "not found" (connection is still good for protocol errors)
 		var msgLen uint16
 		if err := binary.Read(conn, binary.BigEndian, &msgLen); err != nil {
+			conn.Close()
+			shouldReturn = false
 			return err
 		}
 		if msgLen > 0 {
 			msgBytes := make([]byte, msgLen)
 			if _, err := io.ReadFull(conn, msgBytes); err != nil {
+				conn.Close()
+				shouldReturn = false
 				return err
 			}
 			msg := strings.ToLower(string(msgBytes))
@@ -430,6 +701,8 @@ func (c *Client) Delete(key string) error {
 		}
 		return ErrNotFound
 	default:
+		conn.Close()
+		shouldReturn = false
 		return fmt.Errorf("unexpected status: %d", status)
 	}
 }
@@ -455,29 +728,46 @@ func (c *Client) Ping() error {
 		return errors.New("no servers configured")
 	}
 
-	conn, err := net.DialTimeout("tcp", c.servers[0], c.timeout)
+	server := c.servers[0]
+	conn, err := c.getOrCreateConnection(server)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	// Track if we should return connection (set to false on error)
+	shouldReturn := true
+	defer func() {
+		if shouldReturn && conn != nil {
+			c.returnConnection(server, conn)
+		}
+	}()
 
 	// PING is just command byte 0x00 (no key/data)
 	request := []byte{0x00}
 	if _, err := conn.Write(request); err != nil {
+		conn.Close()
+		c.markConnectionDead(server)
+		shouldReturn = false
 		return err
 	}
 
 	// Read status byte
 	statusBuf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, statusBuf); err != nil {
+		conn.Close()
+		c.markConnectionDead(server)
+		shouldReturn = false
 		return err
 	}
 	status := statusBuf[0]
 
 	if status != 0x02 {
+		conn.Close()
+		c.markConnectionDead(server)
+		shouldReturn = false
 		return errors.New("ping failed")
 	}
 
+	// Success - connection will be returned by defer
 	return nil
 }
 
