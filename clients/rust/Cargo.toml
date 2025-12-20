@@ -11,3 +11,4 @@ blazecache = { path = "../../" }
 fnv = "1.0"
 dashmap = "5.5"
 crossbeam = "0.8"
+crossbeam-channel = "0.5"

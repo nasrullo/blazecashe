@@ -1,6 +1,7 @@
 use blazecache_client::blocking::BlockingTcpClient;
 use std::time::Instant;
 use std::thread;
+use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server_addr = "127.0.0.1:6792";
@@ -15,13 +16,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(_) | Err(_) => println!("✓ Server connection verified\n"),
     }
 
+    // Create ONE shared client (like Go does) - all threads share the same connection pool
+    let client = Arc::new(BlockingTcpClient::new(vec![server_addr.to_string()]));
+
     let start = Instant::now();
     let mut handles = Vec::new();
 
     let ops_per_worker = num_ops / num_workers;
 
     for worker_id in 0..num_workers {
-        let client = BlockingTcpClient::new(vec![server_addr.to_string()]);
+        let client = client.clone();
 
         let handle = thread::spawn(move || {
             let mut success = 0;

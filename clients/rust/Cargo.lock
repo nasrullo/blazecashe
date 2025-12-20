@@ -154,6 +154,7 @@ version = "0.1.0"
 dependencies = [
  "blazecache",
  "crossbeam",
+ "crossbeam-channel",
  "dashmap",
  "fnv",
  "tokio",
