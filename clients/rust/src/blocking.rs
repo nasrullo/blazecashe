@@ -8,9 +8,34 @@ use std::collections::HashMap;
 use dashmap::DashMap;
 use crossbeam::queue::SegQueue;
 use crate::{ClientError, SelectionStrategy, ClientConsistentHash, build_ring};
-use blazecache::serializers::BinarySerializer;
-use blazecache::transports::common::{Command, Response};
-use blazecache::transports::Serializer;
+
+// Optimized request encoding (bypasses Command enum to avoid allocations)
+fn encode_get_request(key: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 2 + key.len());
+    buf.push(0x01); // GET command
+    buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    buf.extend_from_slice(key.as_bytes());
+    buf
+}
+
+fn encode_put_request(key: &str, value: &[u8], ttl: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 2 + key.len() + 4 + value.len() + 4);
+    buf.push(0x02); // PUT command
+    buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    buf.extend_from_slice(key.as_bytes());
+    buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    buf.extend_from_slice(value);
+    buf.extend_from_slice(&ttl.to_be_bytes());
+    buf
+}
+
+fn encode_delete_request(key: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 2 + key.len());
+    buf.push(0x03); // DELETE command
+    buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    buf.extend_from_slice(key.as_bytes());
+    buf
+}
 
 // Server selection snapshot for lock-free reads (RCU pattern)
 struct ServerSelection {
@@ -247,7 +272,8 @@ impl BlockingTcpClient {
         let mut stream = self.get_or_create_connection(&server)?;
         let mut should_return = true;
         
-        let request = <BinarySerializer as Serializer>::serialize_command(&Command::Get(key.to_string()));
+        // Optimized: encode directly without Command enum allocation
+        let request = encode_get_request(key);
         let result = match stream.write_all(&request) {
             Err(e) => {
                 should_return = false;
@@ -358,7 +384,8 @@ impl BlockingTcpClient {
         let mut stream = self.get_or_create_connection(&server)?;
         let mut should_return = true;
         
-        let request = <BinarySerializer as Serializer>::serialize_command(&Command::Put(key.to_string(), value, ttl_secs));
+        // Optimized: encode directly without Command enum allocation
+        let request = encode_put_request(key, &value, ttl_secs);
         let write_result = stream.write_all(&request);
         
         let result = match write_result {
@@ -456,4 +483,3 @@ impl BlockingTcpClient {
         result
     }
 }
-
