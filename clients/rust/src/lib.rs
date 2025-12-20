@@ -2,19 +2,46 @@ use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 use tokio::time::Duration;
-use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicPtr, AtomicU32, Ordering}};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, atomic::{AtomicPtr, AtomicU32, Ordering}, Mutex};
 use std::io::Error as IOError;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::error::Error as STDError;
 use dashmap::DashMap;
-use crossbeam::queue::SegQueue;
 
 pub mod blocking;
 
 use blazecache::serializers::BinarySerializer;
 use blazecache::transports::common::{Command, Response};
 use blazecache::transports::Serializer;
+
+// Optimized request encoding (bypasses Command enum to avoid allocations)
+fn encode_get_request(key: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 2 + key.len());
+    buf.push(0x01); // GET command
+    buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    buf.extend_from_slice(key.as_bytes());
+    buf
+}
+
+fn encode_put_request(key: &str, value: &[u8], ttl: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 2 + key.len() + 4 + value.len() + 4);
+    buf.push(0x02); // PUT command
+    buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    buf.extend_from_slice(key.as_bytes());
+    buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    buf.extend_from_slice(value);
+    buf.extend_from_slice(&ttl.to_be_bytes());
+    buf
+}
+
+fn encode_delete_request(key: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 2 + key.len());
+    buf.push(0x03); // DELETE command
+    buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    buf.extend_from_slice(key.as_bytes());
+    buf
+}
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -56,6 +83,13 @@ struct ServerSelection {
     hash_ring: Option<ClientConsistentHash>,
 }
 
+// Pool structure to combine queue/count (reduces DashMap lookups)
+// For async, we use VecDeque with Mutex (async-friendly, Mutex is fine in async context)
+struct ConnectionPool {
+    queue: Arc<Mutex<VecDeque<TcpStream>>>,
+    count: Arc<AtomicU32>,
+}
+
 pub struct TcpClient {
     // Protected by RwLock for writes (strategy changes, peer discovery)
     servers: Arc<RwLock<Vec<String>>>,
@@ -66,9 +100,8 @@ pub struct TcpClient {
     // Lock-free reads using RCU pattern
     selection: Arc<AtomicPtr<ServerSelection>>,
     current_index: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    // Connection pooling (lock-free using DashMap and SegQueue)
-    connection_pools: Arc<DashMap<String, Arc<SegQueue<TcpStream>>>>,
-    pool_counts: Arc<DashMap<String, Arc<AtomicU32>>>,
+    // Connection pooling (optimized: single DashMap lookup gets all pool info)
+    pools: Arc<DashMap<String, ConnectionPool>>,
     max_pool_size: u32,
 }
 
@@ -130,8 +163,7 @@ impl TcpClient {
             seed: None,
             refresh_secs: None,
             selection: Arc::new(AtomicPtr::new(std::ptr::null_mut())),
-            connection_pools: Arc::new(DashMap::new()),
-            pool_counts: Arc::new(DashMap::new()),
+            pools: Arc::new(DashMap::new()),
             max_pool_size: MAX_POOL_SIZE,
         };
         // Initialize snapshot (spawn task since we're in sync context)
@@ -170,8 +202,7 @@ impl TcpClient {
             seed: None,
             refresh_secs: None,
             selection: Arc::new(AtomicPtr::new(std::ptr::null_mut())),
-            connection_pools: Arc::new(DashMap::new()),
-            pool_counts: Arc::new(DashMap::new()),
+            pools: Arc::new(DashMap::new()),
             max_pool_size: MAX_POOL_SIZE,
         };
         // Initialize snapshot
@@ -209,8 +240,7 @@ impl TcpClient {
             seed: Some(seed.clone()),
             refresh_secs: Some(refresh_secs),
             selection: Arc::new(AtomicPtr::new(std::ptr::null_mut())),
-            connection_pools: Arc::new(DashMap::new()),
-            pool_counts: Arc::new(DashMap::new()),
+            pools: Arc::new(DashMap::new()),
             max_pool_size: MAX_POOL_SIZE,
         };
         
@@ -370,79 +400,85 @@ impl TcpClient {
     }
 
     async fn get_or_create_connection(&self, server: &str) -> Result<TcpStream, ClientError> {
-        // Fast path: try to get connection from pool (lock-free)
-        if let Some(queue) = self.connection_pools.get(server) {
-            // Try non-blocking pop
-            if let Some(stream) = queue.value().pop() {
-                return Ok(stream);
+        // Optimized: single DashMap lookup gets all pool info (like blocking client)
+        // First try to get existing pool
+        if let Some(pool) = self.pools.get(server) {
+            // Pool exists - try non-blocking pop from queue
+            if let Ok(mut queue) = pool.queue.try_lock() {
+                if let Some(stream) = queue.pop_front() {
+                    return Ok(stream);
+                }
             }
             
-            // Pool empty, check if we can create new connection
-            let count = self.pool_counts
-                .get(server)
-                .map(|c| c.load(Ordering::Relaxed))
-                .unwrap_or(0);
-            
-            if count < self.max_pool_size {
-                // Try to increment counter atomically
-                // Optimize: avoid to_string() by using entry API with &str
-                let pool_count = self.pool_counts
-                    .entry(server.to_string())
-                    .or_insert_with(|| Arc::new(AtomicU32::new(0)))
-                    .clone();
-                
-                let current = pool_count.load(Ordering::Relaxed);
-                if current < self.max_pool_size {
-                    if pool_count.compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-                        // Successfully claimed slot, create connection
-                        match Self::connect_with_nodelay_timeout(server).await {
-                            Ok(stream) => {
-                                // Try to get from pool one more time before returning new
-                                if let Some(pooled_stream) = queue.value().pop() {
+            // Queue empty or locked, check if we can create new connection
+            let current = pool.count.load(Ordering::Relaxed);
+            if current < self.max_pool_size {
+                // Try to increment counter atomically (like Go's CAS)
+                if pool.count.compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                    // Successfully claimed slot, create connection
+                    match Self::connect_with_nodelay_timeout(server).await {
+                        Ok(stream) => {
+                            // Try queue one more time before returning new
+                            if let Ok(mut queue) = pool.queue.try_lock() {
+                                if let Some(pooled_stream) = queue.pop_front() {
                                     // Got one from pool, close new one and return pooled
-                                    pool_count.fetch_sub(1, Ordering::Relaxed);
+                                    pool.count.fetch_sub(1, Ordering::Relaxed);
+                                    drop(queue);
+                                    // Close the new stream (async drop will handle it)
                                     return Ok(pooled_stream);
                                 }
-                                return Ok(stream);
                             }
-                            Err(e) => {
-                                pool_count.fetch_sub(1, Ordering::Relaxed);
-                                return Err(e);
-                            }
+                            return Ok(stream);
+                        }
+                        Err(e) => {
+                            pool.count.fetch_sub(1, Ordering::Relaxed);
+                            return Err(e);
                         }
                     }
                 }
             }
             
-            // Pool full or CAS failed, try one more time
-            if let Some(stream) = queue.value().pop() {
-                return Ok(stream);
+            // CAS failed or pool at max size - try queue again
+            if let Ok(mut queue) = pool.queue.try_lock() {
+                if let Some(stream) = queue.pop_front() {
+                    return Ok(stream);
+                }
             }
             
             // Still nothing, create new connection (allow overflow)
             match Self::connect_with_nodelay_timeout(server).await {
                 Ok(stream) => {
-                    let pool_count = self.pool_counts
-                        .entry(server.to_string())
-                        .or_insert_with(|| Arc::new(AtomicU32::new(0)))
-                        .clone();
-                    pool_count.fetch_add(1, Ordering::Relaxed);
+                    pool.count.fetch_add(1, Ordering::Relaxed);
                     return Ok(stream);
                 }
                 Err(e) => return Err(e),
             }
         }
         
-        // Initialize pool for this server
-        let queue = Arc::new(SegQueue::new());
-        self.connection_pools.insert(server.to_string(), queue.clone());
-        let pool_count = Arc::new(AtomicU32::new(0));
-        self.pool_counts.insert(server.to_string(), pool_count.clone());
+        // Pool doesn't exist - initialize it (like Go's LoadOrStore)
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let count = Arc::new(AtomicU32::new(0));
+        let pool = ConnectionPool {
+            queue: queue.clone(),
+            count: count.clone(),
+        };
+        
+        // Use entry API to ensure only one task initializes
+        let pool_ref = self.pools
+            .entry(server.to_string())
+            .or_insert(pool);
+        
+        // Try queue one more time
+        if let Ok(mut q) = pool_ref.queue.try_lock() {
+            if let Some(stream) = q.pop_front() {
+                return Ok(stream);
+            }
+        }
         
         // Create new connection
         match Self::connect_with_nodelay_timeout(server).await {
             Ok(stream) => {
-                pool_count.fetch_add(1, Ordering::Relaxed);
+                pool_ref.count.fetch_add(1, Ordering::Relaxed);
                 Ok(stream)
             }
             Err(e) => Err(e),
@@ -450,19 +486,23 @@ impl TcpClient {
     }
     
     fn return_connection(&self, server: &str, stream: TcpStream) {
-        if let Some(queue) = self.connection_pools.get(server) {
-            // Push to queue (lock-free, always succeeds)
-            // SegQueue is unbounded, so this always succeeds
-            queue.value().push(stream);
-        } else {
-            // Pool doesn't exist, stream will be dropped and closed automatically
-            // No need to explicitly close
+        // Optimized: single DashMap lookup
+        if let Some(pool) = self.pools.get(server) {
+            // Try non-blocking push to queue
+            if let Ok(mut queue) = pool.queue.try_lock() {
+                queue.push_back(stream);
+                return;
+            }
+            // If lock is contended, just drop the stream (it will be closed)
+            // This is acceptable in high-contention scenarios
         }
+        // Pool doesn't exist or lock contended, stream will be dropped and closed automatically
     }
     
     fn mark_connection_dead(&self, server: &str) {
-        if let Some(count) = self.pool_counts.get(server) {
-            count.fetch_sub(1, Ordering::Relaxed);
+        // Optimized: single DashMap lookup
+        if let Some(pool) = self.pools.get(server) {
+            pool.count.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
@@ -472,7 +512,8 @@ impl TcpClient {
         let mut stream = self.get_or_create_connection(&server).await?;
         let mut should_return = true;
         
-        let request = <BinarySerializer as Serializer>::serialize_command(&Command::Get(key.to_string()));
+        // Optimized: encode directly without Command enum allocation
+        let request = encode_get_request(key);
         let result = match stream.write_all(&request).await {
             Err(e) => {
                 should_return = false;
@@ -585,7 +626,8 @@ impl TcpClient {
         let mut stream = self.get_or_create_connection(&server).await?;
         let mut should_return = true;
         
-        let request = <BinarySerializer as Serializer>::serialize_command(&Command::Put(key.to_string(), value, ttl_secs));
+        // Optimized: encode directly without Command enum allocation
+        let request = encode_put_request(key, &value, ttl_secs);
         let write_result = stream.write_all(&request).await;
         
         let result = match write_result {
@@ -689,7 +731,8 @@ impl TcpClient {
         let mut stream = self.get_or_create_connection(&server).await?;
         let mut should_return = true;
         
-        let request = <BinarySerializer as Serializer>::serialize_command(&Command::Delete(key.to_string()));
+        // Optimized: encode directly without Command enum allocation
+        let request = encode_delete_request(key);
         let write_result = stream.write_all(&request).await;
         
         let result = match write_result {
