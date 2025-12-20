@@ -2,7 +2,6 @@ package com.blazecache;
 
 import java.io.*;
 import java.net.Socket;
-import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
