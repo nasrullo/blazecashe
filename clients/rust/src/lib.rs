@@ -75,6 +75,19 @@ const MAX_POOL_SIZE: u32 = 500;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl TcpClient {
+    // Connect with TCP_NODELAY set (using into_std/from_std - simpler and works)
+    async fn connect_with_nodelay(addr: &str) -> Result<TcpStream, IOError> {
+        let stream = TcpStream::connect(addr).await?;
+        // Set TCP_NODELAY - only do conversion if needed
+        if let Ok(std_stream) = stream.into_std() {
+            let _ = std_stream.set_nodelay(true);
+            TcpStream::from_std(std_stream).map_err(|e| IOError::new(std::io::ErrorKind::Other, e))
+        } else {
+            // If conversion fails, return original stream (nodelay might already be set)
+            Err(IOError::new(std::io::ErrorKind::Other, "Failed to convert stream"))
+        }
+    }
+
     async fn update_selection_snapshot(&self) {
         let servers = self.servers.read().await.clone();
         let strategy = self.strategy.read().await.clone();
@@ -368,30 +381,15 @@ impl TcpClient {
                 if current < self.max_pool_size {
                     if pool_count.compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
                         // Successfully claimed slot, create connection
-                        match tokio::time::timeout(CONNECTION_TIMEOUT, TcpStream::connect(server)).await {
-                            Ok(Ok(mut stream)) => {
-                                // Set TCP_NODELAY for low latency (optimize: only if not already set)
-                                if let Ok(std_stream) = stream.into_std() {
-                                    let _ = std_stream.set_nodelay(true);
-                                    match TcpStream::from_std(std_stream) {
-                                        Ok(s) => {
-                                            // Try to get from pool one more time before returning new
-                                            if let Some(pooled_stream) = queue.value().pop() {
-                                                // Got one from pool, close new one and return pooled
-                                                pool_count.fetch_sub(1, Ordering::Relaxed);
-                                                return Ok(pooled_stream);
-                                            }
-                                            return Ok(s);
-                                        }
-                                        Err(e) => {
-                                            pool_count.fetch_sub(1, Ordering::Relaxed);
-                                            return Err(ClientError::Io(e));
-                                        }
-                                    }
-                                } else {
+                        match tokio::time::timeout(CONNECTION_TIMEOUT, Self::connect_with_nodelay(server)).await {
+                            Ok(Ok(stream)) => {
+                                // Try to get from pool one more time before returning new
+                                if let Some(pooled_stream) = queue.value().pop() {
+                                    // Got one from pool, close new one and return pooled
                                     pool_count.fetch_sub(1, Ordering::Relaxed);
-                                    return Err(ClientError::Io(IOError::new(std::io::ErrorKind::Other, "Failed to convert stream")));
+                                    return Ok(pooled_stream);
                                 }
+                                return Ok(stream);
                             }
                             Ok(Err(e)) => {
                                 pool_count.fetch_sub(1, Ordering::Relaxed);
@@ -412,15 +410,8 @@ impl TcpClient {
             }
             
             // Still nothing, create new connection (allow overflow)
-            match tokio::time::timeout(CONNECTION_TIMEOUT, TcpStream::connect(server)).await {
+            match tokio::time::timeout(CONNECTION_TIMEOUT, Self::connect_with_nodelay(server)).await {
                 Ok(Ok(stream)) => {
-                    // Set TCP_NODELAY
-                    let stream = if let Ok(std_stream) = stream.into_std() {
-                        let _ = std_stream.set_nodelay(true);
-                        TcpStream::from_std(std_stream).map_err(|e| ClientError::Io(e))?
-                    } else {
-                        return Err(ClientError::Io(IOError::new(std::io::ErrorKind::Other, "Failed to convert stream")));
-                    };
                     let pool_count = self.pool_counts
                         .entry(server.to_string())
                         .or_insert_with(|| Arc::new(AtomicU32::new(0)))
@@ -440,15 +431,8 @@ impl TcpClient {
         self.pool_counts.insert(server.to_string(), pool_count.clone());
         
         // Create new connection
-        match tokio::time::timeout(CONNECTION_TIMEOUT, TcpStream::connect(server)).await {
+        match tokio::time::timeout(CONNECTION_TIMEOUT, Self::connect_with_nodelay(server)).await {
             Ok(Ok(stream)) => {
-                // Set TCP_NODELAY
-                let stream = if let Ok(std_stream) = stream.into_std() {
-                    let _ = std_stream.set_nodelay(true);
-                    TcpStream::from_std(std_stream).map_err(|e| ClientError::Io(e))?
-                } else {
-                    return Err(ClientError::Io(IOError::new(std::io::ErrorKind::Other, "Failed to convert stream")));
-                };
                 pool_count.fetch_add(1, Ordering::Relaxed);
                 Ok(stream)
             }
@@ -488,28 +472,84 @@ impl TcpClient {
                 Err(ClientError::Io(e))
             }
             Ok(_) => {
-                let mut buffer = vec![0u8; 8192];
-                match stream.read(&mut buffer).await {
+                // Read status byte first (like Go client with io.ReadFull)
+                let mut status_buf = [0u8; 1];
+                match stream.read_exact(&mut status_buf).await {
                     Err(e) => {
                         should_return = false;
                         self.mark_connection_dead(&server);
                         Err(ClientError::Io(e))
                     }
-                    Ok(0) => {
-                        should_return = false;
-                        self.mark_connection_dead(&server);
-                        Err(ClientError::Io(IOError::new(std::io::ErrorKind::UnexpectedEof, "Connection closed")))
-                    }
-                    Ok(n) => {
-                        buffer.truncate(n);
-                        <BinarySerializer as Serializer>::deserialize_response(&buffer)
-                            .map_err(|e| ClientError::Protocol(e.to_string()))
-                            .and_then(|resp| match resp {
-                                Response::Ok(data) => Ok(Some(data)),
-                                Response::Error(msg) if msg.to_lowercase().contains("not found") => Ok(None),
-                                Response::Error(msg) => Err(ClientError::Protocol(msg)),
-                                _ => Err(ClientError::Protocol("Unexpected response".into())),
-                            })
+                    Ok(_) => {
+                        let status = status_buf[0];
+                        match status {
+                            0x00 => {
+                                // OK - read data length and data
+                                let mut len_buf = [0u8; 4];
+                                match stream.read_exact(&mut len_buf).await {
+                                    Err(e) => {
+                                        should_return = false;
+                                        self.mark_connection_dead(&server);
+                                        Err(ClientError::Io(e))
+                                    }
+                                    Ok(_) => {
+                                        let data_len = u32::from_be_bytes(len_buf) as usize;
+                                        if data_len == 0 {
+                                            Ok(Some(Vec::new()))
+                                        } else {
+                                            let mut data = vec![0u8; data_len];
+                                            match stream.read_exact(&mut data).await {
+                                                Err(e) => {
+                                                    should_return = false;
+                                                    self.mark_connection_dead(&server);
+                                                    Err(ClientError::Io(e))
+                                                }
+                                                Ok(_) => Ok(Some(data))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            0x01 => {
+                                // ERROR - read message length and message
+                                let mut msg_len_buf = [0u8; 2];
+                                match stream.read_exact(&mut msg_len_buf).await {
+                                    Err(e) => {
+                                        should_return = false;
+                                        self.mark_connection_dead(&server);
+                                        Err(ClientError::Io(e))
+                                    }
+                                    Ok(_) => {
+                                        let msg_len = u16::from_be_bytes(msg_len_buf) as usize;
+                                        if msg_len == 0 {
+                                            Ok(None)
+                                        } else {
+                                            let mut msg_bytes = vec![0u8; msg_len];
+                                            match stream.read_exact(&mut msg_bytes).await {
+                                                Err(e) => {
+                                                    should_return = false;
+                                                    self.mark_connection_dead(&server);
+                                                    Err(ClientError::Io(e))
+                                                }
+                                                Ok(_) => {
+                                                    let msg = String::from_utf8_lossy(&msg_bytes);
+                                                    if msg.to_lowercase().contains("not found") {
+                                                        Ok(None)
+                                                    } else {
+                                                        Err(ClientError::Protocol(msg.to_string()))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                should_return = false;
+                                self.mark_connection_dead(&server);
+                                Err(ClientError::Protocol(format!("Unknown status: {}", status)))
+                            }
+                        }
                     }
                 }
             }
