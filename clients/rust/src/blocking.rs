@@ -3,8 +3,7 @@
 
 use std::net::TcpStream;
 use std::io::{Read, Write, Error as IOError};
-use std::sync::{Arc, atomic::{AtomicPtr, AtomicU32, AtomicI32, Ordering}};
-use std::collections::HashMap;
+use std::sync::{Arc, atomic::{AtomicPtr, AtomicI32, Ordering}};
 use dashmap::DashMap;
 use crossbeam_channel;
 use crate::{ClientError, SelectionStrategy, ClientConsistentHash, build_ring};
@@ -44,6 +43,13 @@ struct ServerSelection {
     hash_ring: Option<ClientConsistentHash>,
 }
 
+// Pool structure to combine sender/receiver/count (reduces DashMap lookups)
+struct ConnectionPool {
+    sender: crossbeam_channel::Sender<TcpStream>,
+    receiver: crossbeam_channel::Receiver<TcpStream>,
+    count: Arc<AtomicI32>,
+}
+
 pub struct BlockingTcpClient {
     // Protected by RwLock for writes (strategy changes, peer discovery)
     servers: Arc<std::sync::RwLock<Vec<String>>>,
@@ -54,10 +60,8 @@ pub struct BlockingTcpClient {
     // Lock-free reads using RCU pattern
     selection: Arc<AtomicPtr<ServerSelection>>,
     current_index: Arc<std::sync::atomic::AtomicUsize>,
-    // Connection pooling (using DashMap and channels like Go)
-    connection_pools: Arc<DashMap<String, crossbeam_channel::Receiver<TcpStream>>>,
-    pool_senders: Arc<DashMap<String, crossbeam_channel::Sender<TcpStream>>>,
-    pool_counts: Arc<DashMap<String, Arc<AtomicI32>>>,
+    // Connection pooling (optimized: single DashMap lookup gets all pool info)
+    pools: Arc<DashMap<String, ConnectionPool>>,
     max_pool_size: i32,
 }
 
@@ -75,9 +79,7 @@ impl BlockingTcpClient {
             seed: None,
             refresh_secs: None,
             selection: Arc::new(AtomicPtr::new(std::ptr::null_mut())),
-            connection_pools: Arc::new(DashMap::new()),
-            pool_senders: Arc::new(DashMap::new()),
-            pool_counts: Arc::new(DashMap::new()),
+            pools: Arc::new(DashMap::new()),
             max_pool_size: MAX_POOL_SIZE,
         };
         // Initialize snapshot
@@ -121,11 +123,13 @@ impl BlockingTcpClient {
                     return None;
                 }
                 let index = self.current_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % snapshot.servers.len();
+                // Clone is necessary but snapshot is stable (RCU pattern)
                 Some(snapshot.servers[index].clone())
             }
             SelectionStrategy::ConsistentHashing => {
                 if let Some(ref r) = snapshot.hash_ring {
                     if let Some(s) = r.pick_server(key) {
+                        // pick_server returns &str, convert to String
                         return Some(s.to_string());
                     }
                 }
@@ -177,29 +181,26 @@ impl BlockingTcpClient {
     }
 
     fn get_or_create_connection(&self, server: &str) -> Result<TcpStream, ClientError> {
-        // Fast path: lock-free read using DashMap (like Go's sync.Map)
-        let receiver_opt = self.connection_pools.get(server);
-        let sender_opt = self.pool_senders.get(server);
-        let count_opt = self.pool_counts.get(server);
-        
-        if let (Some(r), Some(s), Some(c)) = (receiver_opt, sender_opt, count_opt) {
+        // Optimized: single DashMap lookup gets all pool info (like Go's single sync.Map.Load)
+        // First try to get existing pool
+        if let Some(pool) = self.pools.get(server) {
             // Pool exists - try non-blocking receive (like Go's select with default)
-            match r.try_recv() {
+            match pool.receiver.try_recv() {
                 Ok(stream) => return Ok(stream),
                 Err(_) => {
                     // Channel empty, check if we can create new connection
-                    let current = c.load(Ordering::Relaxed);
+                    let current = pool.count.load(Ordering::Relaxed);
                     if current < self.max_pool_size {
                         // Try to increment counter atomically (like Go's CAS)
-                        if c.compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+                        if pool.count.compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
                             // Successfully claimed slot, create connection
                             match Self::connect_with_nodelay(server) {
                                 Ok(stream) => {
                                     // Try channel one more time before returning new
-                                    match r.try_recv() {
+                                    match pool.receiver.try_recv() {
                                         Ok(pooled_stream) => {
                                             // Got one from pool, close new one and return pooled
-                                            c.fetch_sub(1, Ordering::Relaxed);
+                                            pool.count.fetch_sub(1, Ordering::Relaxed);
                                             let _ = stream.shutdown(std::net::Shutdown::Both);
                                             return Ok(pooled_stream);
                                         }
@@ -207,19 +208,19 @@ impl BlockingTcpClient {
                                     }
                                 }
                                 Err(e) => {
-                                    c.fetch_sub(1, Ordering::Relaxed);
+                                    pool.count.fetch_sub(1, Ordering::Relaxed);
                                     return Err(ClientError::Io(e));
                                 }
                             }
                         }
                         // CAS failed, try channel again
-                        match r.try_recv() {
+                        match pool.receiver.try_recv() {
                             Ok(stream) => return Ok(stream),
                             Err(_) => {
                                 // Still nothing, create new connection (allow overflow)
                                 match Self::connect_with_nodelay(server) {
                                     Ok(stream) => {
-                                        c.fetch_add(1, Ordering::Relaxed);
+                                        pool.count.fetch_add(1, Ordering::Relaxed);
                                         return Ok(stream);
                                     }
                                     Err(e) => return Err(ClientError::Io(e)),
@@ -228,13 +229,13 @@ impl BlockingTcpClient {
                         }
                     } else {
                         // Pool at max size, try channel one more time
-                        match r.try_recv() {
+                        match pool.receiver.try_recv() {
                             Ok(stream) => return Ok(stream),
                             Err(_) => {
                                 // Still no connection, create new one (allow overflow)
                                 match Self::connect_with_nodelay(server) {
                                     Ok(stream) => {
-                                        c.fetch_add(1, Ordering::Relaxed);
+                                        pool.count.fetch_add(1, Ordering::Relaxed);
                                         return Ok(stream);
                                     }
                                     Err(e) => return Err(ClientError::Io(e)),
@@ -244,46 +245,43 @@ impl BlockingTcpClient {
                     }
                 }
             }
-        } else {
-            // Pool doesn't exist - initialize it (like Go's LoadOrStore)
-            let (s, r) = crossbeam_channel::bounded(self.max_pool_size as usize);
-            let count = Arc::new(AtomicI32::new(0));
-            
-            // Use entry API to ensure only one thread initializes
-            let actual_receiver = self.connection_pools
-                .entry(server.to_string())
-                .or_insert_with(|| r)
-                .clone();
-            let actual_sender = self.pool_senders
-                .entry(server.to_string())
-                .or_insert_with(|| s)
-                .clone();
-            let actual_count = self.pool_counts
-                .entry(server.to_string())
-                .or_insert_with(|| count)
-                .clone();
-            
-            // Try channel one more time
-            match actual_receiver.try_recv() {
-                Ok(stream) => return Ok(stream),
-                Err(_) => {
-                    // Create new connection
-                    match Self::connect_with_nodelay(server) {
-                        Ok(stream) => {
-                            actual_count.fetch_add(1, Ordering::Relaxed);
-                            return Ok(stream);
-                        }
-                        Err(e) => return Err(ClientError::Io(e)),
+        }
+        
+        // Pool doesn't exist - initialize it (like Go's LoadOrStore)
+        let (sender, receiver) = crossbeam_channel::bounded(self.max_pool_size as usize);
+        let count = Arc::new(AtomicI32::new(0));
+        let pool = ConnectionPool {
+            sender,
+            receiver,
+            count,
+        };
+        
+        // Use entry API to ensure only one thread initializes
+        let pool_ref = self.pools
+            .entry(server.to_string())
+            .or_insert(pool);
+        
+        // Try channel one more time
+        match pool_ref.receiver.try_recv() {
+            Ok(stream) => return Ok(stream),
+            Err(_) => {
+                // Create new connection
+                match Self::connect_with_nodelay(server) {
+                    Ok(stream) => {
+                        pool_ref.count.fetch_add(1, Ordering::Relaxed);
+                        return Ok(stream);
                     }
+                    Err(e) => return Err(ClientError::Io(e)),
                 }
             }
         }
     }
     
     fn return_connection(&self, server: &str, stream: TcpStream) {
-        if let Some(sender) = self.pool_senders.get(server) {
+        // Optimized: single DashMap lookup
+        if let Some(pool) = self.pools.get(server) {
             // Try non-blocking send first (like Go's select with default)
-            match sender.try_send(stream) {
+            match pool.sender.try_send(stream) {
                 Ok(_) => {
                     // Successfully returned to pool (lock-free)
                     return;
@@ -292,17 +290,13 @@ impl BlockingTcpClient {
                     // Channel full, close connection
                     let _ = stream.shutdown(std::net::Shutdown::Both);
                     // Decrement counter atomically (lock-free)
-                    if let Some(count) = self.pool_counts.get(server) {
-                        count.fetch_sub(1, Ordering::Relaxed);
-                    }
+                    pool.count.fetch_sub(1, Ordering::Relaxed);
                 }
                 Err(crossbeam_channel::TrySendError::Disconnected(stream)) => {
                     // Channel disconnected, close connection
                     let _ = stream.shutdown(std::net::Shutdown::Both);
                     // Decrement counter atomically (lock-free)
-                    if let Some(count) = self.pool_counts.get(server) {
-                        count.fetch_sub(1, Ordering::Relaxed);
-                    }
+                    pool.count.fetch_sub(1, Ordering::Relaxed);
                 }
             }
         } else {
@@ -312,9 +306,9 @@ impl BlockingTcpClient {
     }
     
     fn mark_connection_dead(&self, server: &str) {
-        // Lock-free read using DashMap (like Go's sync.Map)
-        if let Some(count) = self.pool_counts.get(server) {
-            count.fetch_sub(1, Ordering::Relaxed);
+        // Optimized: single DashMap lookup
+        if let Some(pool) = self.pools.get(server) {
+            pool.count.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
