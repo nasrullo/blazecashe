@@ -2,8 +2,11 @@ package com.blazecache;
 
 import java.io.*;
 import java.net.Socket;
+import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class CacheClient {
@@ -20,6 +23,12 @@ public class CacheClient {
     private final AtomicLong counter = new AtomicLong(0);
     private final int timeout = 5000; // 5 seconds
     private final List<String> expanded; // pre-expanded list for weighted round robin
+    
+    // Connection pooling (optimized for high throughput)
+    private final ConcurrentHashMap<String, BlockingQueue<Socket>> connectionPools = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicInteger> poolCounts = new ConcurrentHashMap<>();
+    private static final int MAX_POOL_SIZE = 500; // Maximum connections per server
+    private static final int CONNECTION_TIMEOUT = 5000; // 5 seconds
     
     public CacheClient(List<String> servers) {
         this(servers, SelectionStrategy.ROUND_ROBIN, Collections.emptyList());
@@ -74,13 +83,10 @@ public class CacheClient {
     
     public Optional<byte[]> get(String key) throws IOException {
         String server = selectServer(key);
-        String[] parts = server.split(":");
-        String host = parts[0];
-        int port = Integer.parseInt(parts[1]);
+        Socket socket = getOrCreateConnection(server);
+        boolean shouldReturn = true;
         
-        try (Socket socket = new Socket(host, port)) {
-            socket.setSoTimeout(timeout);
-            
+        try {
             byte[] request = encodeRequest((byte) 0x01, key, new byte[0]);
             socket.getOutputStream().write(request);
             
@@ -93,20 +99,31 @@ public class CacheClient {
                 case 0x01:
                     return Optional.empty();
                 default:
+                    shouldReturn = false;
+                    markConnectionDead(server);
                     throw new IOException("Server error: " + resp.message);
+            }
+        } catch (IOException e) {
+            shouldReturn = false;
+            markConnectionDead(server);
+            throw e;
+        } finally {
+            if (shouldReturn) {
+                returnConnection(server, socket);
+            } else if (socket != null) {
+                try {
+                    socket.close();
+                } catch (IOException ignored) {}
             }
         }
     }
     
     public void set(String key, byte[] value) throws IOException {
         String server = selectServer(key);
-        String[] parts = server.split(":");
-        String host = parts[0];
-        int port = Integer.parseInt(parts[1]);
+        Socket socket = getOrCreateConnection(server);
+        boolean shouldReturn = true;
         
-        try (Socket socket = new Socket(host, port)) {
-            socket.setSoTimeout(timeout);
-            
+        try {
             byte[] request = encodeRequest((byte) 0x02, key, value);
             socket.getOutputStream().write(request);
             
@@ -114,20 +131,31 @@ public class CacheClient {
             ResponseData resp = decodeResponse(response);
             
             if (resp.status != 0x00) {
+                shouldReturn = false;
+                markConnectionDead(server);
                 throw new IOException("Set failed: " + resp.message);
+            }
+        } catch (IOException e) {
+            shouldReturn = false;
+            markConnectionDead(server);
+            throw e;
+        } finally {
+            if (shouldReturn) {
+                returnConnection(server, socket);
+            } else if (socket != null) {
+                try {
+                    socket.close();
+                } catch (IOException ignored) {}
             }
         }
     }
     
     public boolean delete(String key) throws IOException {
         String server = selectServer(key);
-        String[] parts = server.split(":");
-        String host = parts[0];
-        int port = Integer.parseInt(parts[1]);
+        Socket socket = getOrCreateConnection(server);
+        boolean shouldReturn = true;
         
-        try (Socket socket = new Socket(host, port)) {
-            socket.setSoTimeout(timeout);
-            
+        try {
             byte[] request = encodeRequest((byte) 0x03, key, new byte[0]);
             socket.getOutputStream().write(request);
             
@@ -140,7 +168,21 @@ public class CacheClient {
                 case 0x01:
                     return false;
                 default:
+                    shouldReturn = false;
+                    markConnectionDead(server);
                     throw new IOException("Delete failed: " + resp.message);
+            }
+        } catch (IOException e) {
+            shouldReturn = false;
+            markConnectionDead(server);
+            throw e;
+        } finally {
+            if (shouldReturn) {
+                returnConnection(server, socket);
+            } else if (socket != null) {
+                try {
+                    socket.close();
+                } catch (IOException ignored) {}
             }
         }
     }
@@ -162,13 +204,10 @@ public class CacheClient {
         }
         
         String server = servers.get(0);
-        String[] parts = server.split(":");
-        String host = parts[0];
-        int port = Integer.parseInt(parts[1]);
+        Socket socket = getOrCreateConnection(server);
+        boolean shouldReturn = true;
         
-        try (Socket socket = new Socket(host, port)) {
-            socket.setSoTimeout(timeout);
-            
+        try {
             // PING is just command byte 0x00 (no key/data)
             socket.getOutputStream().write(new byte[]{(byte) 0x00});
             
@@ -176,8 +215,138 @@ public class CacheClient {
             ResponseData resp = decodeResponse(response);
             
             if (resp.status != 0x02) {
+                shouldReturn = false;
+                markConnectionDead(server);
                 throw new IOException("Ping failed: expected PONG (0x02), got " + resp.status);
             }
+        } catch (IOException e) {
+            shouldReturn = false;
+            markConnectionDead(server);
+            throw e;
+        } finally {
+            if (shouldReturn) {
+                returnConnection(server, socket);
+            } else if (socket != null) {
+                try {
+                    socket.close();
+                } catch (IOException ignored) {}
+            }
+        }
+    }
+    
+    // Connection pooling methods (optimized for high throughput)
+    private Socket getOrCreateConnection(String server) throws IOException {
+        // Fast path: try to get connection from pool (non-blocking)
+        BlockingQueue<Socket> pool = connectionPools.get(server);
+        if (pool != null) {
+            Socket conn = pool.poll(); // Non-blocking
+            if (conn != null) {
+                // Verify connection is still alive
+                if (conn.isConnected() && !conn.isClosed()) {
+                    return conn;
+                }
+            }
+        }
+        
+        // Pool doesn't exist or is empty - initialize or create new connection
+        if (pool == null) {
+            // Initialize pool for this server (only happens once per server)
+            pool = new LinkedBlockingQueue<>(MAX_POOL_SIZE);
+            BlockingQueue<Socket> existing = connectionPools.putIfAbsent(server, pool);
+            if (existing != null) {
+                pool = existing; // Another thread created it first
+            }
+            poolCounts.putIfAbsent(server, new AtomicInteger(0));
+        }
+        
+        AtomicInteger count = poolCounts.get(server);
+        int current = count.get();
+        
+        // Try to create new connection if pool not at max size
+        if (current < MAX_POOL_SIZE) {
+            if (count.compareAndSet(current, current + 1)) {
+                // Successfully claimed slot, create connection
+                try {
+                    Socket conn = createConnection(server);
+                    // Try pool one more time before returning new
+                    Socket pooled = pool.poll();
+                    if (pooled != null && pooled.isConnected() && !pooled.isClosed()) {
+                        // Got one from pool, close new one and return pooled
+                        count.decrementAndGet();
+                        try {
+                            conn.close();
+                        } catch (IOException ignored) {}
+                        return pooled;
+                    }
+                    return conn;
+                } catch (IOException e) {
+                    count.decrementAndGet();
+                    throw e;
+                }
+            }
+        }
+        
+        // CAS failed or pool at max size - try pool again or create new (allow overflow)
+        Socket pooled = pool.poll();
+        if (pooled != null && pooled.isConnected() && !pooled.isClosed()) {
+            return pooled;
+        }
+        
+        // Still nothing, create new connection (allow overflow to prevent blocking)
+        Socket conn = createConnection(server);
+        count.incrementAndGet();
+        return conn;
+    }
+    
+    private Socket createConnection(String server) throws IOException {
+        String[] parts = server.split(":");
+        String host = parts[0];
+        int port = Integer.parseInt(parts[1]);
+        
+        Socket socket = new Socket();
+        socket.setSoTimeout(timeout);
+        socket.setTcpNoDelay(true); // Disable Nagle's algorithm for low latency
+        socket.connect(new java.net.InetSocketAddress(host, port), CONNECTION_TIMEOUT);
+        
+        return socket;
+    }
+    
+    private void returnConnection(String server, Socket socket) {
+        if (socket == null || socket.isClosed()) {
+            return;
+        }
+        
+        BlockingQueue<Socket> pool = connectionPools.get(server);
+        if (pool == null) {
+            // Pool doesn't exist, just close the connection
+            try {
+                socket.close();
+            } catch (IOException ignored) {}
+            return;
+        }
+        
+        // Try non-blocking offer first (fast path)
+        if (pool.offer(socket)) {
+            // Successfully returned to pool
+            return;
+        }
+        
+        // Pool is full, close connection
+        try {
+            socket.close();
+        } catch (IOException ignored) {}
+        
+        // Decrement counter atomically
+        AtomicInteger count = poolCounts.get(server);
+        if (count != null) {
+            count.decrementAndGet();
+        }
+    }
+    
+    private void markConnectionDead(String server) {
+        AtomicInteger count = poolCounts.get(server);
+        if (count != null) {
+            count.decrementAndGet();
         }
     }
     
