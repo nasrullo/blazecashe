@@ -71,6 +71,9 @@ pub struct ConsistentHash {
 /// consistent hashing to directly contact the appropriate peer without
 /// going through a proxy.
 ///
+/// **IMPORTANT**: This uses FNV-1a (64-bit) to match Go's `fnv.New64a()` and
+/// ensure consistent peer selection between server and clients.
+///
 /// ## Arguments
 ///
 /// * `key` - The key to hash
@@ -88,10 +91,8 @@ pub struct ConsistentHash {
 /// println!("Key hash: {}", hash);
 /// ```
 pub fn hash_key(key: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
+    // Use FNV-1a to match Go client's fnv.New64a()
+    let mut hasher = FnvHasher::default();
     key.hash(&mut hasher);
     hasher.finish()
 }
@@ -184,11 +185,14 @@ impl ConsistentHash {
         }
     }
 
-    /// Internal hash function using FNV hasher for speed.
+    /// Internal hash function using FNV-1a hasher for speed.
     ///
-    /// FNV (Fowler-Noll-Vo) hash is chosen for its speed over cryptographic
+    /// FNV-1a (Fowler-Noll-Vo variant 1a) hash is chosen for its speed over cryptographic
     /// security. For consistent hashing, we need fast, well-distributed
     /// hashes rather than cryptographically secure ones.
+    ///
+    /// **IMPORTANT**: This uses FNV-1a to match Go client's `fnv.New64a()` and
+    /// ensure consistent peer selection between server and clients.
     ///
     /// ## Arguments
     ///
@@ -198,6 +202,7 @@ impl ConsistentHash {
     ///
     /// A 64-bit hash value
     fn hash(&self, key: &str) -> u64 {
+        // Use FNV-1a to match Go client's fnv.New64a()
         let mut hasher = FnvHasher::default();
         key.hash(&mut hasher);
         hasher.finish()

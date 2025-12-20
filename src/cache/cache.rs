@@ -22,6 +22,8 @@ pub struct Cache {
     // For deferred LRU updates: track recently accessed keys
     lru_update_queue: Arc<RwLock<HashSet<String>>>,
     lru_update_threshold: Arc<AtomicUsize>,
+    // Track memory usage incrementally to avoid O(n) recalculations
+    current_memory: Arc<AtomicUsize>,
 }
 
 impl Clone for Cache {
@@ -35,6 +37,7 @@ impl Clone for Cache {
             running: Arc::clone(&self.running),
             lru_update_queue: Arc::clone(&self.lru_update_queue),
             lru_update_threshold: Arc::clone(&self.lru_update_threshold),
+            current_memory: Arc::clone(&self.current_memory),
         }
     }
 }
@@ -119,6 +122,7 @@ impl Cache {
             running: Arc::new(AtomicBool::new(false)),
             lru_update_queue: Arc::new(RwLock::new(HashSet::new())),
             lru_update_threshold: Arc::new(AtomicUsize::new(100)), // Update LRU after 100 reads
+            current_memory: Arc::new(AtomicUsize::new(0)), // Track memory incrementally
         };
         // Only start cleanup task if we're in a tokio runtime
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -142,6 +146,7 @@ impl Cache {
         let data = Arc::clone(&self.data);
         let stats = Arc::clone(&self.stats);
         let atomic_stats = Arc::clone(&self.atomic_stats);
+        let current_memory = Arc::clone(&self.current_memory);
         let interval = self.cleanup_interval;
         let running = Arc::clone(&self.running);
 
@@ -152,35 +157,40 @@ impl Cache {
                 interval.tick().await;
                 
                 let now = current_timestamp();
-                let removed;
-                
-                {
+                let (removed, memory_freed) = {
                     let mut data = data.write();
                     let mut keys_to_remove = Vec::new();
+                    let mut total_freed = 0;
                     
-                    // Find expired keys
+                    // Find expired keys and track memory
                     for (key, entry) in data.iter() {
                         if entry.value.expire > 0 && now > entry.value.expire {
-                            keys_to_remove.push(key.clone());
+                            keys_to_remove.push((key.clone(), entry.size));
                         }
                     }
                     
-                    // Remove expired keys
-                    removed = keys_to_remove.len();
-                    for key in keys_to_remove {
-                        data.pop(&key);
+                    // Remove expired keys and track memory
+                    let count = keys_to_remove.len();
+                    for (key, size) in keys_to_remove {
+                        if data.pop(&key).is_some() {
+                            total_freed += size;
+                        }
                     }
-                }
+                    (count, total_freed)
+                };
                 
                 if removed > 0 {
+                    // Update atomic memory counter
+                    current_memory.fetch_sub(memory_freed, Ordering::Relaxed);
                     // OPTIMIZATION: Use atomic increment
                     atomic_stats.ttl_evictions.fetch_add(removed, Ordering::Relaxed);
                     
+                    let entry_count = data.read().len();
+                    let memory_usage = current_memory.load(Ordering::Relaxed);
                     let mut stats = stats.write();
                     stats.ttl_evictions += removed as u64;
-                    let data_read = data.read();
-                    stats.entry_count = data_read.len();
-                    stats.memory_usage = data_read.iter().map(|(k, v)| k.len() + v.size).sum();
+                    stats.entry_count = entry_count;
+                    stats.memory_usage = memory_usage;
                 }
             }
         });
@@ -190,36 +200,42 @@ impl Cache {
     pub async fn cleanup_expired(&self) -> usize {
         let now = current_timestamp();
         
-        let removed = {
+        let (removed, memory_freed) = {
             let mut data = self.data.write();
             let mut keys_to_remove = Vec::new();
+            let mut total_freed = 0;
             
-            // Find expired keys
+            // Find expired keys and track memory to free
             for (key, entry) in data.iter() {
                 if entry.value.expire > 0 && now > entry.value.expire {
-                    keys_to_remove.push(key.clone());
+                    keys_to_remove.push((key.clone(), entry.size));
                 }
             }
             
-            // Remove expired keys
+            // Remove expired keys and track memory
             let count = keys_to_remove.len();
-            for key in keys_to_remove {
-                data.pop(&key);
+            for (key, size) in keys_to_remove {
+                if data.pop(&key).is_some() {
+                    total_freed += size;
+                }
             }
-            count
+            (count, total_freed)
         };
         
         if removed > 0 {
+            // Update atomic memory counter
+            self.current_memory.fetch_sub(memory_freed, Ordering::Relaxed);
             // OPTIMIZATION: Use atomic increment
             self.atomic_stats.ttl_evictions.fetch_add(removed, Ordering::Relaxed);
             
+            let entry_count = self.data.read().len();
+            let memory_usage = self.current_memory.load(Ordering::Relaxed);
             let mut stats = self.stats.write();
             stats.ttl_evictions += removed as u64;
-            let data_read = self.data.read();
-            stats.entry_count = data_read.len();
-            stats.memory_usage = self.calculate_size(&data_read);
-            *self.atomic_stats.entry_count.write() = stats.entry_count;
-            *self.atomic_stats.memory_usage.write() = stats.memory_usage;
+            stats.entry_count = entry_count;
+            stats.memory_usage = memory_usage;
+            *self.atomic_stats.entry_count.write() = entry_count;
+            *self.atomic_stats.memory_usage.write() = memory_usage;
         }
         
         removed
@@ -341,10 +357,13 @@ impl Cache {
         let is_new = !data.contains(&key);
 
         if is_new {
-            let mut current_size = self.calculate_size(&data);
+            // OPTIMIZATION: Use atomic memory tracking instead of O(n) calculate_size()
+            let mut current_size = self.current_memory.load(Ordering::Relaxed);
             while current_size + item_size > self.max_size {
                 if let Some((_, evicted)) = data.pop_lru() {
-                    current_size -= evicted.size;
+                    current_size = current_size.saturating_sub(evicted.size);
+                    // Update atomic memory counter
+                    self.current_memory.fetch_sub(evicted.size, Ordering::Relaxed);
                     // OPTIMIZATION: Use atomic increment
                     self.atomic_stats.evictions.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -353,17 +372,34 @@ impl Cache {
             }
 
             data.put(key, entry);
+            // Update atomic memory counter
+            self.current_memory.fetch_add(item_size, Ordering::Relaxed);
+            current_size += item_size;
 
             // OPTIMIZATION: Use atomic increment for puts
             self.atomic_stats.puts.fetch_add(1, Ordering::Relaxed);
             
-            // Update computed stats (need lock for these)
+            // Update computed stats (defer expensive operations)
+            let entry_count = data.len();
             let mut stats = self.stats.write();
             stats.puts += 1;
-            stats.entry_count = data.len();
-            stats.memory_usage = self.calculate_size(&data);
-            *self.atomic_stats.entry_count.write() = data.len();
-            *self.atomic_stats.memory_usage.write() = stats.memory_usage;
+            stats.entry_count = entry_count;
+            stats.memory_usage = current_size;
+            *self.atomic_stats.entry_count.write() = entry_count;
+            *self.atomic_stats.memory_usage.write() = current_size;
+        } else {
+            // Update existing entry - need to adjust memory size
+            if let Some(old_entry) = data.pop(&key) {
+                let old_size = old_entry.size;
+                self.current_memory.fetch_sub(old_size, Ordering::Relaxed);
+                data.put(key, entry);
+                self.current_memory.fetch_add(item_size, Ordering::Relaxed);
+                
+                // Update stats
+                let mut stats = self.stats.write();
+                stats.memory_usage = self.current_memory.load(Ordering::Relaxed);
+                *self.atomic_stats.memory_usage.write() = stats.memory_usage;
+            }
         }
 
         Ok(())
@@ -371,18 +407,26 @@ impl Cache {
 
     pub async fn delete(&self, key: &str) -> Result<bool> {
         let mut data = self.data.write();
-        let existed = data.pop(key).is_some();
+        let existed = if let Some(entry) = data.pop(key) {
+            // Update atomic memory counter
+            self.current_memory.fetch_sub(entry.size, Ordering::Relaxed);
+            true
+        } else {
+            false
+        };
 
         if existed {
             // OPTIMIZATION: Use atomic increment
             self.atomic_stats.deletes.fetch_add(1, Ordering::Relaxed);
             
+            let entry_count = data.len();
+            let memory_usage = self.current_memory.load(Ordering::Relaxed);
             let mut stats = self.stats.write();
             stats.deletes += 1;
-            stats.entry_count = data.len();
-            stats.memory_usage = self.calculate_size(&data);
-            *self.atomic_stats.entry_count.write() = data.len();
-            *self.atomic_stats.memory_usage.write() = stats.memory_usage;
+            stats.entry_count = entry_count;
+            stats.memory_usage = memory_usage;
+            *self.atomic_stats.entry_count.write() = entry_count;
+            *self.atomic_stats.memory_usage.write() = memory_usage;
         }
 
         Ok(existed)

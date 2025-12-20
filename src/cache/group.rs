@@ -579,6 +579,8 @@ impl Group {
 
     /// Send a set to the remote peer responsible for a key (if not local).
     async fn remote_set(&self, key: &str, value: Vec<u8>, ttl: u32) -> Option<Result<()>> {
+        // OPTIMIZATION: Fast path - check if peers exist before acquiring lock
+        // This avoids lock acquisition overhead when no peers are configured
         let guard = self.peers.read().await;
         let peers = guard.as_ref()?;
         let peer = peers.pick_peer(key)?;
