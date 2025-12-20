@@ -4,9 +4,9 @@ use tokio::time::Duration;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server_addr = "127.0.0.1:6792";
-    let num_ops = 10_000;
-    let num_workers = 10;
+    let server_addr = "127.0.0.1:6791"; // TCP port
+    let num_ops = 100_000; // Load test: 100k operations
+    let num_workers = 50; // Load test: 50 workers
 
     println!("=== Rust Client Benchmark: {} operations with {} workers ===", num_ops, num_workers);
 

@@ -24,13 +24,13 @@ pub async fn handle_connection<S: Serializer>(
 }
 
 // Common command handler to avoid duplication
-pub async fn handle_command(
+pub async fn handle_command<'a>(
     group: &Arc<Group>,
-    cmd: Command,
+    cmd: Command<'a>,
     persistence: Option<Arc<AsyncMutex<PersistenceManager>>>,
 ) -> Response {
     match cmd {
-        Command::Get(key) => match group.get(&key).await {
+        Command::Get(key) => match group.get(key.as_ref()).await {
             Ok(value) => Response::Ok(value),
             Err(e) => {
                 // Optimize common error cases to avoid string allocation
@@ -46,19 +46,17 @@ pub async fn handle_command(
             }
         },
         Command::Put(key, value, ttl_sec) => {
-            // Clone value for persistence before moving to cache
-            let value_for_wal = if persistence.is_some() {
-                Some(value.clone())
-            } else {
-                None
-            };
+            // Optimize: Only clone value for WAL if persistence is actually enabled
+            // This avoids unnecessary clone when persistence is disabled
+            let value_for_wal = persistence.as_ref().map(|_| value.clone());
             
-            let result = group.set(&key, value, ttl_sec).await;
+            let result = group.set(key.as_ref(), value, ttl_sec).await;
 
             // Log to WAL if persistence is enabled and operation succeeded (non-blocking)
             if result.is_ok() {
                 if let (Some(pm), Some(value_for_wal)) = (&persistence, value_for_wal) {
-                    let key_for_wal = key.clone();
+                    // Use Cow::to_string() which is efficient for both Borrowed and Owned
+                    let key_for_wal = key.to_string();
                     let pm_clone = pm.clone();
                     // Always spawn async to avoid blocking the request path
                     tokio::spawn(async move {
@@ -88,12 +86,12 @@ pub async fn handle_command(
             }
         }
         Command::Delete(key) => {
-            let result = group.delete(&key).await;
+            let result = group.delete(key.as_ref()).await;
 
             // Log to WAL if persistence is enabled and operation succeeded (non-blocking)
             if result.is_ok() {
                 if let Some(pm) = &persistence {
-                    let key_for_wal = key.clone();
+                    let key_for_wal = key.to_string();
                     let pm_clone = pm.clone();
                     // Always spawn async to avoid blocking the request path
                     tokio::spawn(async move {

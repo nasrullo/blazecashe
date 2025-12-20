@@ -4,6 +4,7 @@ use crate::transports::common::{Command, Response};
 use crate::transports::Serializer;
 use crate::utils::{Result, error::BlazeCacheError};
 use async_trait::async_trait;
+use std::borrow::Cow;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -21,7 +22,7 @@ impl RemotePeer {
         }
     }
 
-    async fn send_command(&self, cmd: Command) -> Result<Response> {
+    async fn send_command<'a>(&self, cmd: Command<'a>) -> Result<Response> {
         let payload = BinarySerializer::serialize_command(&cmd);
         let mut guard = self.conn.lock().await;
 
@@ -72,7 +73,7 @@ impl RemotePeer {
 #[async_trait]
 impl Peer for RemotePeer {
     async fn get(&self, _group: &str, key: &str) -> Result<Vec<u8>> {
-        match self.send_command(Command::Get(key.to_string())).await? {
+        match self.send_command(Command::Get(Cow::Borrowed(key))).await? {
             Response::Ok(data) => Ok(data),
             Response::Error(msg) => Err(BlazeCacheError::PeerError(msg).into()),
             _ => Err(BlazeCacheError::PeerError("Invalid get response".into()).into()),
@@ -80,7 +81,7 @@ impl Peer for RemotePeer {
     }
 
     async fn delete(&self, _group: &str, key: &str) -> Result<()> {
-        match self.send_command(Command::Delete(key.to_string())).await? {
+        match self.send_command(Command::Delete(Cow::Borrowed(key))).await? {
             Response::Ok(_) => Ok(()),
             Response::Error(msg) => {
                 if msg == "Not found" {
@@ -94,7 +95,7 @@ impl Peer for RemotePeer {
     }
 
     async fn set(&self, _group: &str, key: &str, value:Vec<u8>, ttl: u32) -> Result<()> {
-        match self.send_command(Command::Put(key.to_string(), value, ttl)).await? {
+        match self.send_command(Command::Put(Cow::Borrowed(key), value, ttl)).await? {
             Response::Ok(_) => Ok(()),
             Response::Error(msg) => Err(BlazeCacheError::PeerError(msg).into()),
             _ => Err(BlazeCacheError::PeerError("Invalid get response".into()).into()),

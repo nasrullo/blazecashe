@@ -2,11 +2,12 @@ use crate::transports::common::{Command, Response};
 use crate::transports::Serializer;
 use base64::{engine::general_purpose, Engine as _};
 use serde_json;
+use std::borrow::Cow;
 
 pub struct JsonSerializer;
 
 impl Serializer for JsonSerializer {
-    fn serialize_command(cmd: &Command) -> Vec<u8> {
+    fn serialize_command<'a>(cmd: &Command<'a>) -> Vec<u8> {
         let json = match cmd {
             Command::Get(key) => serde_json::json!({
                 "type": "get",
@@ -34,14 +35,14 @@ impl Serializer for JsonSerializer {
 
     fn deserialize_command(
         data: &[u8],
-    ) -> Result<Command, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Command<'static>, Box<dyn std::error::Error + Send + Sync>> {
         let json: serde_json::Value = serde_json::from_slice(data)?;
 
         match json["type"].as_str() {
             Some("ping") => Ok(Command::Ping),
             Some("get") => {
                 let key = json["key"].as_str().ok_or("Missing key")?.to_string();
-                Ok(Command::Get(key))
+                Ok(Command::Get(Cow::Owned(key)))
             }
             Some("put") => {
                 let key = json["key"].as_str().ok_or("Missing key")?.to_string();
@@ -53,11 +54,11 @@ impl Serializer for JsonSerializer {
                     0
                 };
 
-                Ok(Command::Put(key, value, ttl))
+                Ok(Command::Put(Cow::Owned(key), value, ttl))
             }
             Some("delete") => {
                 let key = json["key"].as_str().ok_or("Missing key")?.to_string();
-                Ok(Command::Delete(key))
+                Ok(Command::Delete(Cow::Owned(key)))
             }
             Some("peer") => Ok(Command::Peer),
             _ => Err("Unknown command type".into()),

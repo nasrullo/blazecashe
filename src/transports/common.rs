@@ -1,8 +1,10 @@
+use std::borrow::Cow;
+
 #[derive(Debug, Clone)]
-pub enum Command {
-    Get(String),
-    Put(String, Vec<u8>, u32),
-    Delete(String),
+pub enum Command<'a> {
+    Get(Cow<'a, str>),
+    Put(Cow<'a, str>, Vec<u8>, u32),
+    Delete(Cow<'a, str>),
     Peer,
     Ping,
 }

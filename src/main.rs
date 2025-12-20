@@ -5,7 +5,7 @@ use blazecache::serializers::BinarySerializer;
 use blazecache::transports::ProtocolServer;
 use blazecache::utils::persistence::{PersistenceConfig, PersistenceManager};
 use blazecache::utils::config::AppConfig;
-use blazecache::{BlazeCacheError, Getter, Group, TcpServer};
+use blazecache::{BlazeCacheError, Getter, Group, TcpServer, UdpServer};
 use std::env;
 use std::process::Command;
 use std::sync::Arc;
@@ -82,9 +82,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     // Start TCP server using the shared transport implementation with optional persistence.
-    let server = TcpServer::<BinarySerializer>::with_persistence(group, persistence_manager);
-    server.start(config.port).await?;
-    Ok(())
+    let tcp_server = TcpServer::<BinarySerializer>::with_persistence(Arc::clone(&group), persistence_manager.clone());
+    let tcp_port = config.port;
+    tokio::spawn(async move {
+        if let Err(e) = tcp_server.start(tcp_port).await {
+            error!(error = %e, "TCP server error");
+        }
+    });
+
+    // Start UDP server if UDP port is configured
+    if let Some(udp_port) = config.udp_port {
+        let udp_server = UdpServer::<BinarySerializer>::with_persistence(Arc::clone(&group), persistence_manager);
+        let udp_port_clone = udp_port;
+        tokio::spawn(async move {
+            info!(port = udp_port_clone, "Starting UDP server...");
+            match udp_server.start(udp_port_clone).await {
+                Ok(_) => {
+                    error!("UDP server exited unexpectedly");
+                }
+                Err(e) => {
+                    error!(error = %e, "UDP server error");
+                }
+            }
+        });
+        info!(port = udp_port, "UDP server enabled");
+    }
+
+    // Keep main thread alive
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 /// Gets local IP address (simplified - returns 127.0.0.1 for now)
@@ -273,7 +300,8 @@ fn print_help() {
     println!("    blazecache [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("    -p, --port <PORT>              Port to listen on [default: 6784]");
+    println!("    -p, --port <PORT>              TCP port to listen on [default: 6784]");
+    println!("        --udp-port <PORT>          UDP port to listen on [optional]");
     println!("    -m, --memory <MB>              Memory limit in MB [default: 64]");
     println!("    -d, --daemon                   Run as daemon");
     println!("    -w, --wal                      Enable persistence (WAL + recovery)");

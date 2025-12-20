@@ -9,8 +9,6 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::error::Error as STDError;
 use dashmap::DashMap;
 
-pub mod blocking;
-
 use blazecache::serializers::BinarySerializer;
 use blazecache::transports::common::{Command, Response};
 use blazecache::transports::Serializer;

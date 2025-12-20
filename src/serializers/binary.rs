@@ -1,10 +1,11 @@
 use crate::transports::common::{Command, Response};
 use crate::transports::Serializer;
+use std::borrow::Cow;
 
 pub struct BinarySerializer;
 
 impl Serializer for BinarySerializer {
-    fn serialize_command(cmd: &Command) -> Vec<u8> {
+    fn serialize_command<'a>(cmd: &Command<'a>) -> Vec<u8> {
         match cmd {
             Command::Get(key) => {
                 // Pre-allocate with exact capacity
@@ -41,7 +42,7 @@ impl Serializer for BinarySerializer {
 
     fn deserialize_command(
         data: &[u8],
-    ) -> Result<Command, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Command<'static>, Box<dyn std::error::Error + Send + Sync>> {
         if data.is_empty() {
             return Err("Empty data".into());
         }
@@ -60,7 +61,7 @@ impl Serializer for BinarySerializer {
                 // For keys, we still need owned String, but avoid double allocation
                 let key_bytes = &data[3..3 + key_len];
                 let key = String::from_utf8(key_bytes.to_vec())?;
-                Ok(Command::Get(key))
+                Ok(Command::Get(Cow::Owned(key)))
             }
             2 => {
                 if data.len() < 3 {
@@ -107,7 +108,7 @@ impl Serializer for BinarySerializer {
                 } else {
                     0
                 };
-                Ok(Command::Put(key, value, ttl))
+                Ok(Command::Put(Cow::Owned(key), value, ttl))
             }
             3 => {
                 if data.len() < 3 {
@@ -120,7 +121,7 @@ impl Serializer for BinarySerializer {
                 // OPTIMIZATION: Avoid double allocation
                 let key_bytes = &data[3..3 + key_len];
                 let key = String::from_utf8(key_bytes.to_vec())?;
-                Ok(Command::Delete(key))
+                Ok(Command::Delete(Cow::Owned(key)))
             }
             4 => Ok(Command::Peer),
             _ => Err("Unknown command".into()),

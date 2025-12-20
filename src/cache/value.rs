@@ -141,7 +141,7 @@ impl Value {
         self.access_count += 1;
         self.last_access = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
     }
 
@@ -180,7 +180,7 @@ impl Value {
     pub fn is_hot(&self, threshold_count: u32, threshold_age_secs: u64) -> bool {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         self.access_count >= threshold_count && (now - self.last_access) <= threshold_age_secs

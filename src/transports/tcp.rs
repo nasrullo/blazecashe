@@ -5,6 +5,7 @@ use crate::transports::{
 use crate::utils::persistence::PersistenceManager;
 use crate::Group;
 use async_trait::async_trait;
+use std::borrow::Cow;
 use std::error::Error;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -167,7 +168,7 @@ pub trait Serializer: Send + Sync {
     /// ## Returns
     ///
     /// Serialized bytes ready for network transmission.
-    fn serialize_command(cmd: &Command) -> Vec<u8>;
+    fn serialize_command<'a>(cmd: &Command<'a>) -> Vec<u8>;
 
     /// Deserializes bytes into a command.
     ///
@@ -180,7 +181,7 @@ pub trait Serializer: Send + Sync {
     /// ## Returns
     ///
     /// Parsed command or error if deserialization fails.
-    fn deserialize_command(data: &[u8]) -> Result<Command, Box<dyn Error + Send + Sync>>;
+    fn deserialize_command(data: &[u8]) -> Result<Command<'static>, Box<dyn Error + Send + Sync>>;
 
     /// Serializes a response to bytes for transmission.
     ///
@@ -324,7 +325,7 @@ impl<S: Serializer + 'static> ProtocolClient for TcpClient<S> {
     }
 
     async fn get(&mut self, key: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
-        let cmd_data = S::serialize_command(&Command::Get(key.to_string()));
+        let cmd_data = S::serialize_command(&Command::Get(Cow::Borrowed(key)));
         self.stream.write_all(&cmd_data).await?;
 
         let mut buffer = [0; 8192];
@@ -335,7 +336,7 @@ impl<S: Serializer + 'static> ProtocolClient for TcpClient<S> {
     }
 
     async fn put(&mut self, key: &str, value: &[u8], ttl: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let cmd_data = S::serialize_command(&Command::Put(key.to_string(), value.to_vec(), ttl));
+        let cmd_data = S::serialize_command(&Command::Put(Cow::Borrowed(key), value.to_vec(), ttl));
         self.stream.write_all(&cmd_data).await?;
 
         let mut buffer = [0; 1024];
@@ -346,7 +347,7 @@ impl<S: Serializer + 'static> ProtocolClient for TcpClient<S> {
     }
 
     async fn delete(&mut self, key: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        let cmd_data = S::serialize_command(&Command::Delete(key.to_string()));
+        let cmd_data = S::serialize_command(&Command::Delete(Cow::Borrowed(key)));
         self.stream.write_all(&cmd_data).await?;
 
         let mut buffer = [0; 1024];
