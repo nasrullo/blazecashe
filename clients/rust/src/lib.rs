@@ -10,6 +10,8 @@ use std::error::Error as STDError;
 use dashmap::DashMap;
 use crossbeam::queue::SegQueue;
 
+pub mod blocking;
+
 use blazecache::serializers::BinarySerializer;
 use blazecache::transports::common::{Command, Response};
 use blazecache::transports::Serializer;
@@ -832,7 +834,7 @@ impl TcpClient {
 }
 
 #[derive(Clone)]
-struct ClientConsistentHash {
+pub(crate) struct ClientConsistentHash {
     sorted_hashes: Vec<u64>,
     hash_to_index: Vec<usize>,
     servers: Vec<String>,
@@ -898,7 +900,7 @@ impl ClientConsistentHash {
     }
 }
 
-fn build_ring(servers: &[String], strategy: &SelectionStrategy) -> Option<ClientConsistentHash> {
+pub(crate) fn build_ring(servers: &[String], strategy: &SelectionStrategy) -> Option<ClientConsistentHash> {
     if !matches!(strategy, SelectionStrategy::ConsistentHashing) {
         return None;
     }
