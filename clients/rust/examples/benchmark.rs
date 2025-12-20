@@ -2,7 +2,7 @@ use blazecache_client::{TcpClient, SelectionStrategy};
 use std::time::Instant;
 use tokio::time::Duration;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server_addr = "127.0.0.1:6792";
     let num_ops = 10_000;

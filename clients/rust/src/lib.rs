@@ -76,6 +76,7 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl TcpClient {
     // Connect with TCP_NODELAY set (using into_std/from_std - simpler and works)
+    // Optimized: avoid timeout wrapper when not needed
     async fn connect_with_nodelay(addr: &str) -> Result<TcpStream, IOError> {
         let stream = TcpStream::connect(addr).await?;
         // Set TCP_NODELAY - only do conversion if needed
@@ -85,6 +86,15 @@ impl TcpClient {
         } else {
             // If conversion fails, return original stream (nodelay might already be set)
             Err(IOError::new(std::io::ErrorKind::Other, "Failed to convert stream"))
+        }
+    }
+    
+    // Connect with timeout wrapper (for cases where timeout is needed)
+    async fn connect_with_nodelay_timeout(addr: &str) -> Result<TcpStream, ClientError> {
+        match tokio::time::timeout(CONNECTION_TIMEOUT, Self::connect_with_nodelay(addr)).await {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(e)) => Err(ClientError::Io(e)),
+            Err(_) => Err(ClientError::Timeout),
         }
     }
 
@@ -383,8 +393,8 @@ impl TcpClient {
                 if current < self.max_pool_size {
                     if pool_count.compare_exchange(current, current + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
                         // Successfully claimed slot, create connection
-                        match tokio::time::timeout(CONNECTION_TIMEOUT, Self::connect_with_nodelay(server)).await {
-                            Ok(Ok(stream)) => {
+                        match Self::connect_with_nodelay_timeout(server).await {
+                            Ok(stream) => {
                                 // Try to get from pool one more time before returning new
                                 if let Some(pooled_stream) = queue.value().pop() {
                                     // Got one from pool, close new one and return pooled
@@ -393,13 +403,9 @@ impl TcpClient {
                                 }
                                 return Ok(stream);
                             }
-                            Ok(Err(e)) => {
+                            Err(e) => {
                                 pool_count.fetch_sub(1, Ordering::Relaxed);
-                                return Err(ClientError::Io(e));
-                            }
-                            Err(_) => {
-                                pool_count.fetch_sub(1, Ordering::Relaxed);
-                                return Err(ClientError::Timeout);
+                                return Err(e);
                             }
                         }
                     }
@@ -412,8 +418,8 @@ impl TcpClient {
             }
             
             // Still nothing, create new connection (allow overflow)
-            match tokio::time::timeout(CONNECTION_TIMEOUT, Self::connect_with_nodelay(server)).await {
-                Ok(Ok(stream)) => {
+            match Self::connect_with_nodelay_timeout(server).await {
+                Ok(stream) => {
                     let pool_count = self.pool_counts
                         .entry(server.to_string())
                         .or_insert_with(|| Arc::new(AtomicU32::new(0)))
@@ -421,8 +427,7 @@ impl TcpClient {
                     pool_count.fetch_add(1, Ordering::Relaxed);
                     return Ok(stream);
                 }
-                Ok(Err(e)) => return Err(ClientError::Io(e)),
-                Err(_) => return Err(ClientError::Timeout),
+                Err(e) => return Err(e),
             }
         }
         
@@ -433,13 +438,12 @@ impl TcpClient {
         self.pool_counts.insert(server.to_string(), pool_count.clone());
         
         // Create new connection
-        match tokio::time::timeout(CONNECTION_TIMEOUT, Self::connect_with_nodelay(server)).await {
-            Ok(Ok(stream)) => {
+        match Self::connect_with_nodelay_timeout(server).await {
+            Ok(stream) => {
                 pool_count.fetch_add(1, Ordering::Relaxed);
                 Ok(stream)
             }
-            Ok(Err(e)) => Err(ClientError::Io(e)),
-            Err(_) => Err(ClientError::Timeout),
+            Err(e) => Err(e),
         }
     }
     
