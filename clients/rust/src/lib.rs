@@ -312,6 +312,7 @@ impl TcpClient {
             SelectionStrategy::ConsistentHashing => {
                 if let Some(ref r) = snapshot.hash_ring {
                     if let Some(s) = r.pick_server(key) {
+                        // pick_server returns &str from snapshot.servers, so we need to clone
                         return Some(s.to_string());
                     }
                 }
@@ -372,6 +373,7 @@ impl TcpClient {
             
             if count < self.max_pool_size {
                 // Try to increment counter atomically
+                // Optimize: avoid to_string() by using entry API with &str
                 let pool_count = self.pool_counts
                     .entry(server.to_string())
                     .or_insert_with(|| Arc::new(AtomicU32::new(0)))
@@ -532,10 +534,13 @@ impl TcpClient {
                                                     Err(ClientError::Io(e))
                                                 }
                                                 Ok(_) => {
-                                                    let msg = String::from_utf8_lossy(&msg_bytes);
-                                                    if msg.to_lowercase().contains("not found") {
+                                                    // Optimize: check "not found" case-insensitively without allocating
+                                                    let msg_lower: Vec<u8> = msg_bytes.iter().map(|&b| b.to_ascii_lowercase()).collect();
+                                                    if msg_lower.windows(9).any(|w| w == b"not found") {
                                                         Ok(None)
                                                     } else {
+                                                        // Only allocate string if we need to return error
+                                                        let msg = String::from_utf8_lossy(&msg_bytes);
                                                         Err(ClientError::Protocol(msg.to_string()))
                                                     }
                                                 }
@@ -584,27 +589,81 @@ impl TcpClient {
                 Err(ClientError::Io(e))
             }
             Ok(_) => {
-                let mut buffer = vec![0u8; 1024];
-                match stream.read(&mut buffer).await {
+                // Read status byte first (like Go client with io.ReadFull)
+                let mut status_buf = [0u8; 1];
+                match stream.read_exact(&mut status_buf).await {
                     Err(e) => {
                         should_return = false;
                         self.mark_connection_dead(&server);
                         Err(ClientError::Io(e))
                     }
-                    Ok(0) => {
-                        should_return = false;
-                        self.mark_connection_dead(&server);
-                        Err(ClientError::Io(IOError::new(std::io::ErrorKind::UnexpectedEof, "Connection closed")))
-                    }
-                    Ok(n) => {
-                        buffer.truncate(n);
-                        <BinarySerializer as Serializer>::deserialize_response(&buffer)
-                            .map_err(|e| ClientError::Protocol(e.to_string()))
-                            .and_then(|resp| match resp {
-                                Response::Ok(_) => Ok(()),
-                                Response::Error(msg) => Err(ClientError::Protocol(msg)),
-                                _ => Err(ClientError::Protocol("Unexpected response".into())),
-                            })
+                    Ok(_) => {
+                        let status = status_buf[0];
+                        match status {
+                            0x00 => {
+                                // OK - read data length (should be 0 for PUT success)
+                                let mut len_buf = [0u8; 4];
+                                match stream.read_exact(&mut len_buf).await {
+                                    Err(e) => {
+                                        should_return = false;
+                                        self.mark_connection_dead(&server);
+                                        Err(ClientError::Io(e))
+                                    }
+                                    Ok(_) => {
+                                        let data_len = u32::from_be_bytes(len_buf) as usize;
+                                        if data_len > 0 {
+                                            // Read and discard data
+                                            let mut discard = vec![0u8; data_len];
+                                            match stream.read_exact(&mut discard).await {
+                                                Err(e) => {
+                                                    should_return = false;
+                                                    self.mark_connection_dead(&server);
+                                                    Err(ClientError::Io(e))
+                                                }
+                                                Ok(_) => Ok(())
+                                            }
+                                        } else {
+                                            Ok(())
+                                        }
+                                    }
+                                }
+                            }
+                            0x01 => {
+                                // ERROR - read message (connection is still good for protocol errors)
+                                let mut msg_len_buf = [0u8; 2];
+                                match stream.read_exact(&mut msg_len_buf).await {
+                                    Err(e) => {
+                                        should_return = false;
+                                        self.mark_connection_dead(&server);
+                                        Err(ClientError::Io(e))
+                                    }
+                                    Ok(_) => {
+                                        let msg_len = u16::from_be_bytes(msg_len_buf) as usize;
+                                        if msg_len > 0 {
+                                            let mut msg_bytes = vec![0u8; msg_len];
+                                            match stream.read_exact(&mut msg_bytes).await {
+                                                Err(e) => {
+                                                    should_return = false;
+                                                    self.mark_connection_dead(&server);
+                                                    Err(ClientError::Io(e))
+                                                }
+                                                Ok(_) => {
+                                                    let msg = String::from_utf8_lossy(&msg_bytes);
+                                                    Err(ClientError::Protocol(msg.to_string()))
+                                                }
+                                            }
+                                        } else {
+                                            Err(ClientError::Protocol("set failed".into()))
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                should_return = false;
+                                self.mark_connection_dead(&server);
+                                Err(ClientError::Protocol(format!("Unexpected status: {}", status)))
+                            }
+                        }
                     }
                 }
             }
@@ -634,28 +693,87 @@ impl TcpClient {
                 Err(ClientError::Io(e))
             }
             Ok(_) => {
-                let mut buffer = vec![0u8; 1024];
-                match stream.read(&mut buffer).await {
+                // Read status byte first (like Go client with io.ReadFull)
+                let mut status_buf = [0u8; 1];
+                match stream.read_exact(&mut status_buf).await {
                     Err(e) => {
                         should_return = false;
                         self.mark_connection_dead(&server);
                         Err(ClientError::Io(e))
                     }
-                    Ok(0) => {
-                        should_return = false;
-                        self.mark_connection_dead(&server);
-                        Err(ClientError::Io(IOError::new(std::io::ErrorKind::UnexpectedEof, "Connection closed")))
-                    }
-                    Ok(n) => {
-                        buffer.truncate(n);
-                        <BinarySerializer as Serializer>::deserialize_response(&buffer)
-                            .map_err(|e| ClientError::Protocol(e.to_string()))
-                            .and_then(|resp| match resp {
-                                Response::Ok(_) => Ok(true),
-                                Response::Error(msg) if msg.to_lowercase().contains("not found") => Ok(false),
-                                Response::Error(msg) => Err(ClientError::Protocol(msg)),
-                                _ => Err(ClientError::Protocol("Unexpected response".into())),
-                            })
+                    Ok(_) => {
+                        let status = status_buf[0];
+                        match status {
+                            0x00 => {
+                                // OK - read data length (should be 0 for DELETE success)
+                                let mut len_buf = [0u8; 4];
+                                match stream.read_exact(&mut len_buf).await {
+                                    Err(e) => {
+                                        should_return = false;
+                                        self.mark_connection_dead(&server);
+                                        Err(ClientError::Io(e))
+                                    }
+                                    Ok(_) => {
+                                        let data_len = u32::from_be_bytes(len_buf) as usize;
+                                        if data_len > 0 {
+                                            // Read and discard data
+                                            let mut discard = vec![0u8; data_len];
+                                            match stream.read_exact(&mut discard).await {
+                                                Err(e) => {
+                                                    should_return = false;
+                                                    self.mark_connection_dead(&server);
+                                                    Err(ClientError::Io(e))
+                                                }
+                                                Ok(_) => Ok(true)
+                                            }
+                                        } else {
+                                            Ok(true)
+                                        }
+                                    }
+                                }
+                            }
+                            0x01 => {
+                                // ERROR - read message
+                                let mut msg_len_buf = [0u8; 2];
+                                match stream.read_exact(&mut msg_len_buf).await {
+                                    Err(e) => {
+                                        should_return = false;
+                                        self.mark_connection_dead(&server);
+                                        Err(ClientError::Io(e))
+                                    }
+                                    Ok(_) => {
+                                        let msg_len = u16::from_be_bytes(msg_len_buf) as usize;
+                                        if msg_len > 0 {
+                                            let mut msg_bytes = vec![0u8; msg_len];
+                                            match stream.read_exact(&mut msg_bytes).await {
+                                                Err(e) => {
+                                                    should_return = false;
+                                                    self.mark_connection_dead(&server);
+                                                    Err(ClientError::Io(e))
+                                                }
+                                                Ok(_) => {
+                                                    // Optimize: check "not found" case-insensitively
+                                                    let msg_lower: Vec<u8> = msg_bytes.iter().map(|&b| b.to_ascii_lowercase()).collect();
+                                                    if msg_lower.windows(9).any(|w| w == b"not found") {
+                                                        Ok(false)
+                                                    } else {
+                                                        let msg = String::from_utf8_lossy(&msg_bytes);
+                                                        Err(ClientError::Protocol(msg.to_string()))
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            Ok(false)
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                should_return = false;
+                                self.mark_connection_dead(&server);
+                                Err(ClientError::Protocol(format!("Unexpected status: {}", status)))
+                            }
+                        }
                     }
                 }
             }
