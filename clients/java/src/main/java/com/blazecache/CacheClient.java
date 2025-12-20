@@ -240,10 +240,9 @@ public class CacheClient {
         if (pool != null) {
             Socket conn = pool.poll(); // Non-blocking
             if (conn != null) {
-                // Verify connection is still alive
-                if (conn.isConnected() && !conn.isClosed()) {
-                    return conn;
-                }
+                // Skip connection validation in hot path - trust the pool
+                // Dead connections will be detected on use and marked dead
+                return conn;
             }
         }
         
@@ -269,7 +268,7 @@ public class CacheClient {
                     Socket conn = createConnection(server);
                     // Try pool one more time before returning new
                     Socket pooled = pool.poll();
-                    if (pooled != null && pooled.isConnected() && !pooled.isClosed()) {
+                    if (pooled != null) {
                         // Got one from pool, close new one and return pooled
                         count.decrementAndGet();
                         try {
@@ -287,7 +286,7 @@ public class CacheClient {
         
         // CAS failed or pool at max size - try pool again or create new (allow overflow)
         Socket pooled = pool.poll();
-        if (pooled != null && pooled.isConnected() && !pooled.isClosed()) {
+        if (pooled != null) {
             return pooled;
         }
         
@@ -297,15 +296,20 @@ public class CacheClient {
         return conn;
     }
     
+    // Cache parsed server addresses to avoid repeated split/parse
+    private final ConcurrentHashMap<String, java.net.InetSocketAddress> addressCache = new ConcurrentHashMap<>();
+    
     private Socket createConnection(String server) throws IOException {
-        String[] parts = server.split(":");
-        String host = parts[0];
-        int port = Integer.parseInt(parts[1]);
+        // Cache parsed addresses to avoid repeated split/parse overhead
+        java.net.InetSocketAddress addr = addressCache.computeIfAbsent(server, s -> {
+            String[] parts = s.split(":", 2);
+            return new java.net.InetSocketAddress(parts[0], Integer.parseInt(parts[1]));
+        });
         
         Socket socket = new Socket();
         socket.setSoTimeout(timeout);
         socket.setTcpNoDelay(true); // Disable Nagle's algorithm for low latency
-        socket.connect(new java.net.InetSocketAddress(host, port), CONNECTION_TIMEOUT);
+        socket.connect(addr, CONNECTION_TIMEOUT);
         
         return socket;
     }
@@ -350,13 +354,24 @@ public class CacheClient {
     }
     
     private byte[] encodeRequest(byte command, String key, byte[] data) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        // Optimize: pre-calculate size to avoid ByteArrayOutputStream resizing
+        int size = 1; // command byte
+        byte[] keyBytes = null;
+        if (command != 0x00) { // PING doesn't have key/data
+            keyBytes = key.getBytes(StandardCharsets.UTF_8);
+            size += 2 + keyBytes.length; // key length (2 bytes) + key
+            if (command == 0x02) { // PUT has value and TTL
+                size += 4 + data.length + 4; // data length (4) + data + TTL (4)
+            }
+        }
+        
+        // Allocate exact size to avoid resizing
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(size);
         DataOutputStream dos = new DataOutputStream(baos);
         
         dos.writeByte(command);
         
-        if (command != 0x00) { // PING doesn't have key/data
-            byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+        if (command != 0x00) {
             dos.writeShort(keyBytes.length);
             dos.write(keyBytes);
             

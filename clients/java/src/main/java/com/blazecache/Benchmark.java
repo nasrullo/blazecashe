@@ -37,31 +37,46 @@ public class Benchmark {
         CacheClient client = new CacheClient(Arrays.asList(serverAddr));
         
         long start = System.nanoTime();
-        ExecutorService executor = Executors.newFixedThreadPool(numWorkers);
-        CountDownLatch latch = new CountDownLatch(numWorkers);
+        // Use virtual threads for blocking I/O - perfect for network operations
+        // Virtual threads allow many concurrent blocking operations without OS thread overhead
+        // Each operation blocks on I/O (network read/write), which virtual threads handle efficiently
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        // Semaphore limits concurrent operations to avoid overwhelming the connection pool
+        // This prevents contention on ConcurrentHashMap/BlockingQueue in the pool
+        // Virtual threads still provide high concurrency - allow more for better throughput
+        int maxConcurrency = Math.max(numWorkers * 20, 200); // Increased for better parallelism
+        Semaphore semaphore = new Semaphore(maxConcurrency);
+        CountDownLatch latch = new CountDownLatch(numOps);
         AtomicLong success = new AtomicLong(0);
         AtomicLong errors = new AtomicLong(0);
         
-        int opsPerWorker = numOps / numWorkers;
-        
-        for (int workerId = 0; workerId < numWorkers; workerId++) {
-            final int wid = workerId;
+        // Create one task per operation (each does SET then GET sequentially)
+        // Virtual threads handle the blocking I/O efficiently, allowing high concurrency
+        for (int i = 0; i < numOps; i++) {
+            final int opId = i;
             executor.submit(() -> {
                 try {
-                    for (int i = 0; i < opsPerWorker; i++) {
-                        String key = String.format("key-%d-%d", wid, i);
-                        byte[] value = String.format("value-%d-%d", wid, i).getBytes();
+                    semaphore.acquire(); // Limit concurrent operations to avoid pool contention
+                    try {
+                        // Optimize: avoid String.format() - use StringBuilder for better performance
+                        StringBuilder keyBuilder = new StringBuilder(16);
+                        keyBuilder.append("key-").append(opId);
+                        String key = keyBuilder.toString();
                         
-                        // SET operation
+                        StringBuilder valueBuilder = new StringBuilder(16);
+                        valueBuilder.append("value-").append(opId);
+                        byte[] value = valueBuilder.toString().getBytes();
+                        
+                        // SET operation (blocks on I/O - virtual thread handles this efficiently)
                         try {
                             client.set(key, value);
                             success.incrementAndGet();
                         } catch (IOException e) {
                             errors.incrementAndGet();
-                            continue;
+                            return; // Skip GET if SET failed
                         }
                         
-                        // GET operation
+                        // GET operation (blocks on I/O - virtual thread handles this efficiently)
                         try {
                             Optional<byte[]> result = client.get(key);
                             if (result.isPresent() && Arrays.equals(result.get(), value)) {
@@ -72,7 +87,12 @@ public class Benchmark {
                         } catch (IOException e) {
                             errors.incrementAndGet();
                         }
+                    } finally {
+                        semaphore.release();
                     }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    errors.incrementAndGet();
                 } finally {
                     latch.countDown();
                 }
