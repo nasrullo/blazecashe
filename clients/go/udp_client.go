@@ -454,25 +454,69 @@ func (c *UDPClient) receiveResponse(requestID uint32) ([]byte, error) {
 
 		attempts++
 
-		// Try to decode as single datagram first (QUIC fast path)
-		recvRequestID, status, data, err := decodeSingleDatagram(buffer[:n])
-		if err == nil && recvRequestID == requestID {
-			// Single datagram response - found it!
+		// Validate basic packet format first (like Rust client)
+		if n < 9 {
+			continue // Too short, skip
+		}
+
+		// Check magic number
+		magic := binary.BigEndian.Uint16(buffer[0:2])
+		if magic != UDP_MAGIC {
+			continue // Invalid magic, skip
+		}
+
+		// Check version
+		version := buffer[2]
+		if version != UDP_VERSION {
+			continue // Invalid version, skip
+		}
+
+		// Check if it's a response
+		flags := buffer[3]
+		if flags != UDP_FLAG_RESPONSE {
+			continue // Not a response, skip
+		}
+
+		// Extract request ID
+		recvRequestID := binary.BigEndian.Uint32(buffer[4:8])
+
+		// Check if this is our response
+		if recvRequestID != requestID {
+			continue // Wrong request ID, continue waiting
+		}
+
+		// Got the right response! Now parse it
+		// Check if it's a single datagram (byte 8 is status) or fragment (bytes 8-9 are seq_no)
+		byte8 := buffer[8]
+
+		// Single datagram format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][STATUS:1][DATA:...]
+		// Fragment format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][SEQ:2][FRAG_COUNT:2][PAYLOAD_LEN:2][DATA:...]
+		// For single datagram, byte 8 is the status (0x00-0x02)
+		// For fragments, bytes 8-9 are seq_no (u16), which could be 0-65535
+		// If byte 8 is <= 0x02, it's likely a status byte (single datagram)
+		if byte8 <= 0x02 && n >= 9 {
+			// Single datagram response
+			status := byte8
+			data := buffer[9:n]
 			c.conn.SetReadDeadline(time.Time{}) // Clear deadline
 			return c.parseResponse(status, data)
 		}
 
 		// Try to decode as fragment
-		msgType, fragRequestID, seqNo, fragCount, payloadLen, err := decodeFragmentHeader(buffer[:n])
-		if err != nil {
-			continue // Not our packet, continue waiting
+		if n < UDP_HEADER_LEN {
+			continue // Too short for fragment header
 		}
 
-		if msgType != UDP_FLAG_RESPONSE || fragRequestID != requestID {
-			continue // Not our response, continue waiting
-		}
+		seqNo := binary.BigEndian.Uint16(buffer[8:10])
+		fragCount := binary.BigEndian.Uint16(buffer[10:12])
+		payloadLen := binary.BigEndian.Uint16(buffer[12:14])
 
-		// Check payload length
+		if fragCount == 0 || seqNo >= fragCount {
+			continue // Invalid fragment
+		}
+		if payloadLen > UDP_MAX_PAYLOAD {
+			continue // Payload too large
+		}
 		if n < UDP_HEADER_LEN+int(payloadLen) {
 			continue // Incomplete fragment
 		}
