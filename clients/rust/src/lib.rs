@@ -117,11 +117,8 @@ impl TcpClient {
             let _ = std_stream.set_nodelay(true);
             TcpStream::from_std(std_stream).map_err(|e| IOError::new(std::io::ErrorKind::Other, e))
         } else {
-            // If conversion fails, try to reconnect and use the stream as-is
-            // The stream might already have nodelay set or conversion might fail for other reasons
-            // Return a new connection attempt
-            let stream2 = TcpStream::connect(addr).await?;
-            Ok(stream2)
+            // If conversion fails, return original stream (nodelay might already be set)
+            Err(IOError::new(std::io::ErrorKind::Other, "Failed to convert stream"))
         }
     }
     
@@ -855,8 +852,8 @@ impl TcpClient {
         let server = server.clone();
         drop(servers);
         
-        // Use connection with timeout and TCP_NODELAY
-        let mut stream = Self::connect_with_nodelay_timeout(&server).await?;
+        // Use direct connection (original working method)
+        let mut stream = TcpStream::connect(&server).await?;
         let request = <BinarySerializer as Serializer>::serialize_command(&Command::Ping);
         stream.write_all(&request).await?;
 
