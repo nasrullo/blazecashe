@@ -42,7 +42,7 @@ use tracing::{error, info};
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
-/// let group = Arc::new(Group::new("cache".to_string(), 100 * 1024 * 1024, getter));
+/// let group = Arc::new(Group::new("cache".to_string(), 100 * 1024 * 1024, getter, "127.0.0.1:8080".to_string()));
 /// let server = TcpServer::<BinarySerializer>::new(group);
 ///
 /// println!("Starting TCP server on port 8080...");
@@ -84,7 +84,7 @@ impl<S> TcpServer<S> {
     /// # use blazecache::{Group, Getter, transports::TcpServer, serializers::BinarySerializer};
     /// # use std::sync::Arc;
     /// # let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
-    /// let group = Arc::new(Group::new("cache".to_string(), 1024 * 1024, getter));
+    /// let group = Arc::new(Group::new("cache".to_string(), 1024 * 1024, getter, "127.0.0.1:8080".to_string()));
     /// let server = TcpServer::<BinarySerializer>::new(group);
     /// ```
     pub fn new(group: Arc<Group>) -> Self {
@@ -132,6 +132,7 @@ impl<S> TcpServer<S> {
 /// ```rust,no_run
 /// # use blazecache::transports::{tcp::Serializer, common::{Command, Response}};
 /// # use std::error::Error;
+/// # use std::borrow::Cow;
 /// struct MySerializer;
 ///
 /// impl Serializer for MySerializer {
@@ -140,7 +141,7 @@ impl<S> TcpServer<S> {
 ///         vec![]
 ///     }
 ///     
-///     fn deserialize_command(data: &[u8]) -> Result<Command, Box<dyn Error + Send + Sync>> {
+///     fn deserialize_command(data: &[u8]) -> Result<Command<'static>, Box<dyn Error + Send + Sync>> {
 ///         // Custom deserialization logic
 ///         todo!()
 ///     }
@@ -249,7 +250,7 @@ impl<S: Serializer + 'static> ProtocolServer for TcpServer<S> {
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let getter: Getter = Arc::new(|key: &str| Ok(format!("data-{}", key).into_bytes()));
-    /// let group = Arc::new(Group::new("cache".to_string(), 100 * 1024 * 1024, getter));
+    /// let group = Arc::new(Group::new("cache".to_string(), 100 * 1024 * 1024, getter, "127.0.0.1:8080".to_string()));
     /// let server = TcpServer::<BinarySerializer>::new(group);
     ///
     /// // This will run forever, handling connections

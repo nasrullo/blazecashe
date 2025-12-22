@@ -50,7 +50,7 @@
 //! ## Protocol Format
 //!
 //! ### Single-Datagram Format (Fast Path)
-//! ```
+//! ```text
 //! [0-1]   Magic (0xBC01)
 //! [2]     Version (1)
 //! [3]     Flags (0 = Request, 1 = Response)
@@ -60,7 +60,7 @@
 //! ```
 //!
 //! ### Fragment Format (Multi-Datagram)
-//! ```
+//! ```text
 //! [0-1]   Magic (0xBC01)
 //! [2]     Version (1)
 //! [3]     Flags (bit 0 = Response, other bits reserved)
