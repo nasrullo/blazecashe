@@ -49,10 +49,11 @@ TCP load test encountered persistent connection issues. The server starts succes
 
 | Metric | UDP | TCP |
 |--------|-----|-----|
-| Success Rate | 100.00% | TBD |
-| Throughput | 345,307 ops/sec | TBD |
-| Avg Latency | 2.90 µs | TBD |
-| Errors | 0 | TBD |
+| Success Rate | 100.00% | Connection issues |
+| Throughput | 353,393 ops/sec | N/A |
+| Avg Latency | 2.83 µs | N/A |
+| Errors | 0 | Connection failed |
+| Time Elapsed | 565.94 ms | N/A |
 
 ## Notes
 
