@@ -14,7 +14,7 @@ use crate::stats::OpenOperationStats;
 #[clap(name = "rust-client")]
 pub struct Opt {
     /// Server address to connect to
-    #[clap(default_value = "127.0.0.1:6793")]
+    #[clap(default_value = "127.0.0.1:6793", value_name = "SERVER")]
     pub server: String,
     /// Number of concurrent operations
     #[clap(long, default_value = "100")]
