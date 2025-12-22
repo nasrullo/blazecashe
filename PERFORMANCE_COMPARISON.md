@@ -22,24 +22,28 @@
   - High throughput (~345K operations per second)
   - Perfect reliability (100% success rate)
 
-## TCP Results ✅
+## TCP Results ⚠️
 
-### Performance Metrics
-- **Total Operations**: 200,000 (100,000 SET + 100,000 GET)
-- **Success Rate**: 100.00% (200,000 successful, 0 errors)
-- **Time Elapsed**: [To be measured]
-- **Throughput**: [To be measured]
-- **Average Latency**: [To be measured]
+### Status
+TCP load test encountered persistent connection issues. The server starts successfully and listens on port 6784, but the client connection fails with "Connection refused" errors. The server process appears to exit or become unresponsive when run in the background.
+
+### Server Status
+- Server starts correctly: ✓
+- Server listens on port 6784: ✓
+- Server process stays alive: ✗ (process dies or becomes unresponsive)
+- Client connection: ✗ (Connection refused)
 
 ### Fixes Applied
 - Updated `ping()` method to use `connect_with_nodelay_timeout` for proper timeout handling
 - Improved `connect_with_nodelay` error handling to handle stream conversion failures
-- Connection issues resolved - TCP client now connects successfully
+- Connection timeout set to 5 seconds
+- TCP_NODELAY enabled for better performance
 
 ### Analysis
-- TCP implementation now connects successfully
-- Connection timeout handling improved
-- Ready for performance comparison testing
+- TCP server code appears correct (binds to 0.0.0.0:6784, logs "TCP server listening")
+- Issue appears to be related to process lifecycle when run in background
+- May require investigation of tokio runtime behavior in background processes
+- Connection code improvements are in place and should work once server stability is resolved
 
 ## Comparison Summary
 
