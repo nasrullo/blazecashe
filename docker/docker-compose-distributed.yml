@@ -196,7 +196,7 @@ services:
     ports:
       - "6792:6784"  # TCP port
       - "6797:6793"  # UDP port
-      - "6793:6785"  # Gossip port
+      - "6798:6785"  # Gossip port (changed from 6793 to avoid conflict)
     sysctls:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
