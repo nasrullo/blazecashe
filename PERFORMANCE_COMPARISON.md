@@ -11,9 +11,9 @@
 ### Performance Metrics
 - **Total Operations**: 200,000 (100,000 SET + 100,000 GET)
 - **Success Rate**: 100.00% (200,000 successful, 0 errors)
-- **Time Elapsed**: 579.19 ms
-- **Throughput**: 345,307.22 ops/sec
-- **Average Latency**: 2.90 µs/op
+- **Time Elapsed**: 565.94 ms
+- **Throughput**: 353,393 ops/sec
+- **Average Latency**: 2.83 µs/op
 
 ### Analysis
 - UDP implementation achieved excellent performance with:
