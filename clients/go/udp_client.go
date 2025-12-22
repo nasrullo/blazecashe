@@ -227,8 +227,8 @@ func decodeSingleDatagram(buf []byte) (requestID uint32, status byte, data []byt
 	}
 
 	requestID = binary.BigEndian.Uint32(buf[4:8])
-	status = buf[8]  // Status byte (0x00=OK, 0x01=NOT_FOUND, 0x02=ERROR)
-	data = buf[9:]   // Data starts after status byte
+	status = buf[8] // Status byte (0x00=OK, 0x01=NOT_FOUND, 0x02=ERROR)
+	data = buf[9:]  // Data starts after status byte
 
 	return requestID, status, data, nil
 }
@@ -421,22 +421,44 @@ func (c *UDPClient) Set(key string, value []byte, ttl uint32) error {
 
 // receiveResponse receives and reassembles a response (QUIC datagram reassembly)
 func (c *UDPClient) receiveResponse(requestID uint32) ([]byte, error) {
-	c.conn.SetReadDeadline(time.Now().Add(UDP_CLIENT_TIMEOUT))
-	defer c.conn.SetReadDeadline(time.Time{})
-
+	deadline := time.Now().Add(UDP_CLIENT_TIMEOUT)
 	var reassembly *ReassemblyState
 	buffer := make([]byte, UDP_MAX_DATAGRAM)
+	attempts := 0
 
 	for {
+		// Check deadline
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("response timeout after %d attempts (request_id=%d)", attempts, requestID)
+		}
+
+		// Set read deadline with remaining time
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("response timeout after %d attempts (request_id=%d)", attempts, requestID)
+		}
+		c.conn.SetReadDeadline(time.Now().Add(remaining))
+
 		n, _, err := c.conn.ReadFromUDP(buffer)
 		if err != nil {
+			// Check if it's a timeout
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Timeout - check if we still have time overall
+				if time.Now().After(deadline) {
+					return nil, fmt.Errorf("response timeout after %d attempts (request_id=%d)", attempts, requestID)
+				}
+				continue // Try again if we have time
+			}
 			return nil, fmt.Errorf("failed to receive response: %w", err)
 		}
+
+		attempts++
 
 		// Try to decode as single datagram first (QUIC fast path)
 		recvRequestID, status, data, err := decodeSingleDatagram(buffer[:n])
 		if err == nil && recvRequestID == requestID {
-			// Single datagram response
+			// Single datagram response - found it!
+			c.conn.SetReadDeadline(time.Time{}) // Clear deadline
 			return c.parseResponse(status, data)
 		}
 
@@ -478,6 +500,7 @@ func (c *UDPClient) receiveResponse(requestID uint32) ([]byte, error) {
 				return nil, errors.New("invalid response")
 			}
 			status := completeData[0]
+			c.conn.SetReadDeadline(time.Time{}) // Clear deadline
 			return c.parseResponse(status, completeData[1:])
 		}
 	}
@@ -485,9 +508,10 @@ func (c *UDPClient) receiveResponse(requestID uint32) ([]byte, error) {
 
 // parseResponse parses a response and returns the data or error
 // Status byte meanings:
-//   0x00 = OK (with data for GET, no data for PUT)
-//   0x01 = NOT FOUND (no additional data)
-//   0x02 = ERROR (with error message)
+//
+//	0x00 = OK (with data for GET, no data for PUT)
+//	0x01 = NOT FOUND (no additional data)
+//	0x02 = ERROR (with error message)
 func (c *UDPClient) parseResponse(status byte, data []byte) ([]byte, error) {
 	switch status {
 	case 0x00: // OK
