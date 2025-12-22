@@ -102,7 +102,7 @@
 
 use crate::transports::common::{Command, ProtocolClient, ProtocolServer, Response};
 use crate::transports::{
-    handle_command, handle_get_response, handle_ping_response, handle_put_response, Serializer,
+    handle_command, handle_get_response, handle_put_response, Serializer,
 };
 use crate::utils::persistence::PersistenceManager;
 use crate::Group;
@@ -118,7 +118,6 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::info;
 use futures::future;
@@ -433,6 +432,7 @@ impl Reassembly {
 type ReassemblyKey = (SocketAddr, u32);
 
 /// Request work item for concurrent processing (QUIC stream work item)
+#[allow(dead_code)]
 /// This structure encapsulates a single-datagram request for processing
 struct UdpRequest {
     cmd_byte: u8,
@@ -444,17 +444,17 @@ struct UdpRequest {
 #[async_trait]
 impl<S: Serializer + 'static> ProtocolServer for UdpServer<S> {
     async fn start(&self, port: u16) -> Result<(), Box<dyn Error + Send + Sync>> {
-        /// QUIC Feature: SO_REUSEPORT Load Distribution
-        ///
-        /// This optimization spawns multiple server instances that all bind to the same UDP port.
-        /// The kernel distributes incoming packets across these sockets, similar to QUIC's
-        /// multi-path support for load balancing.
-        ///
-        /// Benefits:
-        /// - Reduces contention on a single socket
-        /// - Improves throughput by parallelizing packet reception
-        /// - Allows better CPU utilization across cores
-        /// - Similar to QUIC's connection migration and multi-path support
+        // QUIC Feature: SO_REUSEPORT Load Distribution
+        //
+        // This optimization spawns multiple server instances that all bind to the same UDP port.
+        // The kernel distributes incoming packets across these sockets, similar to QUIC's
+        // multi-path support for load balancing.
+        //
+        // Benefits:
+        // - Reduces contention on a single socket
+        // - Improves throughput by parallelizing packet reception
+        // - Allows better CPU utilization across cores
+        // - Similar to QUIC's connection migration and multi-path support
         let num_instances = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
@@ -474,14 +474,14 @@ impl<S: Serializer + 'static> ProtocolServer for UdpServer<S> {
                 
                 // Set socket options for maximum performance
                 socket.set_reuse_address(true)?;
-                /// QUIC Feature: SO_REUSEPORT
-                /// Allows multiple sockets to bind to the same port, enabling kernel-level
-                /// load distribution. This is similar to QUIC's multi-path support.
+                // QUIC Feature: SO_REUSEPORT
+                // Allows multiple sockets to bind to the same port, enabling kernel-level
+                // load distribution. This is similar to QUIC's multi-path support.
                 socket.set_reuse_port(true)?;
                 
-                /// QUIC Feature: Large Buffer Sizes
-                /// Increases socket buffer sizes to handle high-throughput scenarios,
-                /// similar to QUIC's connection buffer management.
+                // QUIC Feature: Large Buffer Sizes
+                // Increases socket buffer sizes to handle high-throughput scenarios,
+                // similar to QUIC's connection buffer management.
                 socket.set_recv_buffer_size(4 * 1024 * 1024)?; // 4MB receive buffer
                 socket.set_send_buffer_size(4 * 1024 * 1024)?; // 4MB send buffer
                 
@@ -530,22 +530,20 @@ impl<S: Serializer + 'static> UdpServer<S> {
         loop {
             let (len, addr) = socket.recv_from(&mut buffer).await?;
             
-            let socket_clone = Arc::clone(&socket);
-            let group = Arc::clone(&self.group);
             let inflight = Arc::clone(&inflight);
             let persistence = self.persistence.clone();
 
-            /// QUIC Feature: Fast Path for Single-Datagram Messages (0-RTT Optimization)
-            ///
-            /// This optimization bypasses fragmentation overhead for small messages that fit
-            /// in a single UDP datagram. Similar to QUIC's 0-RTT optimization, this reduces
-            /// latency and overhead for common operations.
-            ///
-            /// Single-datagram format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][CMD:1][DATA:...]
-            /// Fragment format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][SEQ:2][FRAG_COUNT:2][PAYLOAD_LEN:2][DATA:...]
-            ///
-            /// We distinguish by checking if byte 8 is a command (0x01-0x04) vs a fragment seq
-            /// (fragments have SEQ_NO in bytes 8-9, which is unlikely to be 0x01-0x04)
+            // QUIC Feature: Fast Path for Single-Datagram Messages (0-RTT Optimization)
+            //
+            // This optimization bypasses fragmentation overhead for small messages that fit
+            // in a single UDP datagram. Similar to QUIC's 0-RTT optimization, this reduces
+            // latency and overhead for common operations.
+            //
+            // Single-datagram format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][CMD:1][DATA:...]
+            // Fragment format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][SEQ:2][FRAG_COUNT:2][PAYLOAD_LEN:2][DATA:...]
+            //
+            // We distinguish by checking if byte 8 is a command (0x01-0x04) vs a fragment seq
+            // (fragments have SEQ_NO in bytes 8-9, which is unlikely to be 0x01-0x04)
             if len >= 9 && len <= MAX_DATAGRAM {
                 let magic = u16::from_be_bytes([buffer[0], buffer[1]]);
                 if magic == MAGIC && buffer[2] == VERSION {
@@ -563,15 +561,14 @@ impl<S: Serializer + 'static> UdpServer<S> {
                         let cmd_data = buffer[9..len].to_vec(); // Copy data before spawning
                         
                         // Handle single-datagram requests directly (fast path)
-                        let socket_clone = Arc::clone(&socket);
-                        let group = Arc::clone(&self.group);
+                        let _group = Arc::clone(&self.group);
                         let _persistence = self.persistence.clone();
                         
-                        /// QUIC Feature: Inline Handling for Simple Operations
-                        ///
-                        /// For very simple operations (PING), we handle them inline to avoid
-                        /// task spawn overhead. This is similar to QUIC's fast path for
-                        /// connection establishment and keep-alive packets.
+                        // QUIC Feature: Inline Handling for Simple Operations
+                        //
+                        // For very simple operations (PING), we handle them inline to avoid
+                        // task spawn overhead. This is similar to QUIC's fast path for
+                        // connection establishment and keep-alive packets.
                         if cmd_byte == 0x04 {
                             // PING - handle inline (no async needed, no group access needed)
                             let mut response = Vec::with_capacity(9);
@@ -587,12 +584,12 @@ impl<S: Serializer + 'static> UdpServer<S> {
                             continue;
                         }
                         
-                        /// QUIC Feature: Concurrent Request Processing (Stream Multiplexing)
-                        ///
-                        /// For GET/PUT operations, we spawn tasks for concurrent processing.
-                        /// This allows multiple requests to be processed in parallel, similar
-                        /// to QUIC's stream multiplexing where multiple streams can be
-                        /// processed concurrently on the same connection.
+                        // QUIC Feature: Concurrent Request Processing (Stream Multiplexing)
+                        //
+                        // For GET/PUT operations, we spawn tasks for concurrent processing.
+                        // This allows multiple requests to be processed in parallel, similar
+                        // to QUIC's stream multiplexing where multiple streams can be
+                        // processed concurrently on the same connection.
                         if cmd_byte == 0x01 || cmd_byte == 0x02 {
                             let socket_spawn = Arc::clone(&socket);
                             let group_spawn = Arc::clone(&self.group);
@@ -672,13 +669,13 @@ impl<S: Serializer + 'static> UdpServer<S> {
                                     let _ = socket_spawn.send_to(&response, addr_spawn).await;
                                 }
                             });
-                            /// QUIC Feature: Explicit Task Scheduling
-                            ///
-                            /// We yield to allow the spawned task to start executing. This is
-                            /// necessary because we immediately continue to recv_from, and the
-                            /// runtime needs a chance to schedule the spawned task. Similar to
-                            /// QUIC's flow control where the protocol explicitly manages when
-                            /// to process different streams.
+                            // QUIC Feature: Explicit Task Scheduling
+                            //
+                            // We yield to allow the spawned task to start executing. This is
+                            // necessary because we immediately continue to recv_from, and the
+                            // runtime needs a chance to schedule the spawned task. Similar to
+                            // QUIC's flow control where the protocol explicitly manages when
+                            // to process different streams.
                             tokio::task::yield_now().await;
                             continue;
                         }
@@ -687,6 +684,8 @@ impl<S: Serializer + 'static> UdpServer<S> {
             }
             
             let packet = buffer[..len].to_vec();
+            let socket_clone = Arc::clone(&socket);
+            let group = Arc::clone(&self.group);
             tokio::spawn(async move {
                 let (hdr, payload) = match decode_fragment(&packet) {
                     Ok(v) => v,
@@ -703,11 +702,11 @@ impl<S: Serializer + 'static> UdpServer<S> {
                 {
                     let mut map = inflight.lock().await;
 
-                    /// QUIC Feature: Timeout-based Cleanup (Connection Timeout)
-                    ///
-                    /// We clean up expired reassembly entries opportunistically to prevent
-                    /// memory leaks. This is similar to QUIC's connection timeout mechanism
-                    /// where idle connections are closed after a timeout period.
+                    // QUIC Feature: Timeout-based Cleanup (Connection Timeout)
+                    //
+                    // We clean up expired reassembly entries opportunistically to prevent
+                    // memory leaks. This is similar to QUIC's connection timeout mechanism
+                    // where idle connections are closed after a timeout period.
                     let now = Instant::now();
                     map.retain(|_, r| now.duration_since(r.created_at) <= REASSEMBLY_TIMEOUT);
 
@@ -916,22 +915,22 @@ where
 #[async_trait]
 impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
     async fn connect(addr: &str) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        /// QUIC Feature: Optimized Socket Configuration
-        ///
-        /// The client socket is configured for maximum performance, similar to QUIC's
-        /// connection establishment optimizations:
-        /// - Large buffer sizes for high-throughput scenarios
-        /// - Reuse address for connection pooling (if needed)
-        /// - Optimized for low-latency, high-throughput operations
+        // QUIC Feature: Optimized Socket Configuration
+        //
+        // The client socket is configured for maximum performance, similar to QUIC's
+        // connection establishment optimizations:
+        // - Large buffer sizes for high-throughput scenarios
+        // - Reuse address for connection pooling (if needed)
+        // - Optimized for low-latency, high-throughput operations
         use socket2::{Domain, Socket, Type, Protocol};
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
         
         // Set socket options for maximum performance
         socket.set_reuse_address(true)?;
         
-        /// QUIC Feature: Large Buffer Sizes
-        /// Increases socket buffer sizes to handle high-throughput scenarios,
-        /// similar to QUIC's connection buffer management.
+        // QUIC Feature: Large Buffer Sizes
+        // Increases socket buffer sizes to handle high-throughput scenarios,
+        // similar to QUIC's connection buffer management.
         socket.set_recv_buffer_size(4 * 1024 * 1024)?; // 4MB receive buffer
         socket.set_send_buffer_size(4 * 1024 * 1024)?; // 4MB send buffer
         
@@ -946,11 +945,11 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
     }
 
     async fn ping(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        /// QUIC Feature: Fast Path for PING (0-RTT Optimization)
-        ///
-        /// PING uses direct encoding without Command enum serialization, bypassing
-        /// fragmentation overhead. This is similar to QUIC's 0-RTT optimization
-        /// for connection establishment and keep-alive packets.
+        // QUIC Feature: Fast Path for PING (0-RTT Optimization)
+        //
+        // PING uses direct encoding without Command enum serialization, bypassing
+        // fragmentation overhead. This is similar to QUIC's 0-RTT optimization
+        // for connection establishment and keep-alive packets.
         let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let mut packet = [0u8; 9]; // Stack-allocated for ping
         packet[0..2].copy_from_slice(&MAGIC.to_be_bytes());
@@ -982,11 +981,11 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
 
     async fn get(&mut self, key: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
         use std::borrow::Cow;
-        /// QUIC Feature: Fast Path for GET (0-RTT Optimization)
-        ///
-        /// GET uses direct encoding for small requests that fit in a single datagram.
-        /// This bypasses Command enum serialization and fragmentation overhead,
-        /// similar to QUIC's 0-RTT optimization for small datagrams.
+        // QUIC Feature: Fast Path for GET (0-RTT Optimization)
+        //
+        // GET uses direct encoding for small requests that fit in a single datagram.
+        // This bypasses Command enum serialization and fragmentation overhead,
+        // similar to QUIC's 0-RTT optimization for small datagrams.
         let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let key_bytes = key.as_bytes();
         let key_len = key_bytes.len();
@@ -1068,11 +1067,11 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
 
     async fn put(&mut self, key: &str, value: &[u8], ttl: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
         use std::borrow::Cow;
-        /// QUIC Feature: Fast Path for PUT (0-RTT Optimization)
-        ///
-        /// PUT uses direct encoding for small requests that fit in a single datagram.
-        /// This bypasses Command enum serialization and fragmentation overhead,
-        /// similar to QUIC's 0-RTT optimization for small datagrams.
+        // QUIC Feature: Fast Path for PUT (0-RTT Optimization)
+        //
+        // PUT uses direct encoding for small requests that fit in a single datagram.
+        // This bypasses Command enum serialization and fragmentation overhead,
+        // similar to QUIC's 0-RTT optimization for small datagrams.
         let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let key_bytes = key.as_bytes();
         let key_len = key_bytes.len();

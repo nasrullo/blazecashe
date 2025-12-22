@@ -15,7 +15,6 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use blazecache::utils::time::current_timestamp;
-use pprof::ProfilerGuard;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

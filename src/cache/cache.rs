@@ -432,6 +432,7 @@ impl Cache {
         Ok(existed)
     }
 
+    #[allow(dead_code)]
     fn calculate_size(&self, data: &LruCache<String, CacheEntry>) -> usize {
         data.iter().map(|(k, v)| k.len() + v.size).sum()
     }
