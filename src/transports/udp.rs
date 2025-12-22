@@ -119,7 +119,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
-use tracing::info;
+use tracing::{info, warn};
 use futures::future;
 
 /// UDP Server with QUIC-like features for high-performance message handling.
