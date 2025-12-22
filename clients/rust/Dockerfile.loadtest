@@ -1,0 +1,23 @@
+FROM rust:1-bookworm AS builder
+
+WORKDIR /app
+# Copy the entire workspace (needed for blazecache dependency)
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY clients/rust ./clients/rust
+# Build the load test binary
+WORKDIR /app/clients/rust
+RUN cargo build --release --example loadtest_100k
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the release binary from the builder stage
+COPY --from=builder /app/clients/rust/target/release/examples/loadtest_100k /usr/local/bin/loadtest
+
+WORKDIR /app
+CMD ["loadtest"]
+

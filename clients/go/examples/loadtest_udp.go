@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/blazecache/client"
+	blazecache "github.com/blazecache/client"
 )
 
 func main() {
@@ -125,4 +125,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-

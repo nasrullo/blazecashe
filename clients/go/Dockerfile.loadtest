@@ -1,0 +1,20 @@
+FROM golang:1.21-bookworm AS builder
+
+WORKDIR /app
+COPY . .
+# Build the load test binary
+RUN go build -o loadtest ./examples/loadtest_100k.go
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the load test binary from the builder stage
+COPY --from=builder /app/loadtest /usr/local/bin/loadtest
+
+WORKDIR /app
+CMD ["loadtest"]
+
+
