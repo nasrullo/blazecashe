@@ -1,0 +1,27 @@
+[package]
+name = "blazecache-perf"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "blazecache-perf"
+path = "src/bin/perf.rs"
+
+[features]
+default = ["json-output"]
+# Allow for json output from the perf client
+json-output = ["serde", "serde_json"]
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.5"
+clap = { version = "4.4", features = ["derive"] }
+hdrhistogram = "7.5"
+serde = { version = "1.0", optional = true }
+serde_json = { version = "1.0", optional = true }
+tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+blazecache = { path = "../" }
+

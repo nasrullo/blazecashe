@@ -1,0 +1,69 @@
+use std::process::{Command, Stdio};
+use std::time::Duration;
+use anyhow::{Context, Result};
+use clap::Parser;
+use tracing::info;
+
+/// Go UDP client performance test runner
+#[derive(Parser)]
+#[clap(name = "go-client")]
+pub struct Opt {
+    /// Server address to connect to
+    #[clap(default_value = "127.0.0.1:6793")]
+    pub server: String,
+    /// Number of concurrent operations
+    #[clap(long, default_value = "100")]
+    pub concurrency: u64,
+    /// Value size for PUT operations (can use SI suffixes: k, M, G)
+    #[clap(long, default_value = "1k", value_parser = crate::parse_byte_size)]
+    pub value_size: u64,
+    /// The time to run in seconds
+    #[clap(long, default_value = "60")]
+    pub duration: u64,
+    /// The interval in seconds at which stats are reported
+    #[clap(long, default_value = "1")]
+    pub interval: u64,
+}
+
+pub async fn run(opt: Opt) -> Result<()> {
+    info!("Running Go client performance test");
+    
+    // Build Go perf client if it doesn't exist
+    let go_perf_bin = std::path::Path::new("target/go-perf-client");
+    if !go_perf_bin.exists() {
+        info!("Building Go performance client...");
+        let status = Command::new("go")
+            .args(&["build", "-o", "target/go-perf-client", "clients/go/examples/perf_test.go"])
+            .status()
+            .context("failed to build Go client")?;
+        
+        if !status.success() {
+            anyhow::bail!("Go client build failed");
+        }
+    }
+
+    // Run Go client
+    let output = Command::new(go_perf_bin)
+        .args(&[
+            "-server", &opt.server,
+            "-concurrency", &opt.concurrency.to_string(),
+            "-value-size", &opt.value_size.to_string(),
+            "-duration", &opt.duration.to_string(),
+            "-interval", &opt.interval.to_string(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("failed to run Go client")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Go client failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("{}", stdout);
+
+    Ok(())
+}
+
