@@ -960,9 +960,18 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
         
         self.socket.send_to(&packet, &self.server_addr).await?;
         
-        // Receive response - no timeout for fast path (localhost should be instant)
+        // Receive response with timeout
         let mut buffer = [0u8; MAX_DATAGRAM];
-        let (len, _) = self.socket.recv_from(&mut buffer).await?;
+        let recv_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.socket.recv_from(&mut buffer)
+        ).await;
+        
+        let (len, _) = match recv_result {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => return Err(Box::new(e)),
+            Err(_) => return Err("ping timeout".into()),
+        };
         
         if len < 9 || u16::from_be_bytes([buffer[0], buffer[1]]) != MAGIC || buffer[2] != VERSION {
             return Err("invalid ping response".into());
