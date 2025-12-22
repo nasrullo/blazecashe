@@ -666,7 +666,16 @@ impl<S: Serializer + 'static> UdpServer<S> {
                                 
                                 // Send response
                                 if response.len() <= MAX_DATAGRAM {
-                                    let _ = socket_spawn.send_to(&response, addr_spawn).await;
+                                    match socket_spawn.send_to(&response, addr_spawn).await {
+                                        Ok(n) => {
+                                            info!("Sent response for request_id={}, len={}, to={}", request_id_spawn, n, addr_spawn);
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to send response for request_id={}, error={}", request_id_spawn, e);
+                                        }
+                                    }
+                                } else {
+                                    warn!("Response too large for request_id={}, len={}", request_id_spawn, response.len());
                                 }
                             });
                             // QUIC Feature: Explicit Task Scheduling
