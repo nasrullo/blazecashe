@@ -852,7 +852,8 @@ impl TcpClient {
         let server = server.clone();
         drop(servers);
         
-        let mut stream = TcpStream::connect(&server).await?;
+        // Use connection with timeout and TCP_NODELAY
+        let mut stream = Self::connect_with_nodelay_timeout(&server).await?;
         let request = <BinarySerializer as Serializer>::serialize_command(&Command::Ping);
         stream.write_all(&request).await?;
 
