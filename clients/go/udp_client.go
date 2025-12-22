@@ -344,7 +344,7 @@ func (c *UDPClient) Get(key string) ([]byte, error) {
 	}
 
 	// Large message - fragment it
-	fragments, err := fragmentMessage(requestID, UDP_FLAG_REQUEST, cmdData)
+	fragments, err := fragmentMessage(requestID, UDP_FLAG_REQUEST, cmdData.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("failed to fragment message: %w", err)
 	}
