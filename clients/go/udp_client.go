@@ -44,13 +44,15 @@ type UDPClient struct {
 
 // NewUDPClient creates a new UDP client connected to the specified server
 func NewUDPClient(serverAddr string) (*UDPClient, error) {
-	addr, err := net.ResolveUDPAddr("udp", serverAddr)
+	// Force IPv4 resolution to avoid IPv6 issues
+	addr, err := net.ResolveUDPAddr("udp4", serverAddr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid server address: %w", err)
 	}
 
 	// Create UDP socket with optimized settings
-	conn, err := net.ListenUDP("udp", nil)
+	// Use "udp4" to force IPv4 (avoid IPv6 issues)
+	conn, err := net.ListenUDP("udp4", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create UDP socket: %w", err)
 	}
@@ -293,27 +295,47 @@ func (c *UDPClient) Ping() error {
 	}
 
 	// Receive response with timeout
-	c.conn.SetReadDeadline(time.Now().Add(UDP_CLIENT_TIMEOUT))
+	deadline := time.Now().Add(UDP_CLIENT_TIMEOUT)
+	c.conn.SetReadDeadline(deadline)
 	defer c.conn.SetReadDeadline(time.Time{})
 
 	buffer := make([]byte, UDP_MAX_DATAGRAM)
 	for {
+		// Check deadline before reading
+		if time.Now().After(deadline) {
+			return fmt.Errorf("ping timeout: failed to receive pong")
+		}
+		
+		// Update deadline with remaining time
+		remaining := deadline.Sub(time.Now())
+		if remaining <= 0 {
+			return fmt.Errorf("ping timeout: failed to receive pong")
+		}
+		c.conn.SetReadDeadline(time.Now().Add(remaining))
+		
 		n, _, err := c.conn.ReadFromUDP(buffer)
 		if err != nil {
+			// Check if it's a timeout error
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				if time.Now().After(deadline) {
+					return fmt.Errorf("ping timeout: failed to receive pong")
+				}
+				continue // Try again if we still have time
+			}
 			return fmt.Errorf("failed to receive pong: %w", err)
 		}
 
 		// Try to decode as single datagram first
-		recvRequestID, command, _, err := decodeSingleDatagram(buffer[:n])
+		recvRequestID, status, _, err := decodeSingleDatagram(buffer[:n])
 		if err == nil && recvRequestID == requestID {
-			if command == 0x00 { // PONG response
+			if status == 0x00 { // PONG response (0x00 = OK)
 				return nil
 			}
-			return errors.New("ping failed")
+			return fmt.Errorf("ping failed: unexpected status %d", status)
 		}
 
-		// Check if it's a fragment (would need reassembly, but PING should be single datagram)
-		// For now, just continue waiting
+		// Wrong request ID or decode error - continue waiting
+		// (might be a response for a different request)
 	}
 }
 

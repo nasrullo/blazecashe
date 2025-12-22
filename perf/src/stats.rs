@@ -43,6 +43,12 @@ impl Default for Stats {
 }
 
 impl Stats {
+    /// Set the start time for stats calculation
+    pub fn set_start_time(&mut self, start: Instant) {
+        self.start_instant = start;
+        self.start = SystemTime::now();
+    }
+
     pub fn on_interval(&mut self, start: Instant, operation_stats: &OpenOperationStats) {
         let mut interval = Interval::new(start - self.start_instant, self.start_instant.elapsed());
         let mut guard = operation_stats.0.lock().unwrap();
@@ -391,4 +397,5 @@ mod json {
         }
     }
 }
+
 

@@ -36,18 +36,25 @@ pub async fn run(opt: Opt) -> Result<()> {
     
     let go_perf_bin = project_root.join("target/go-perf-client");
     let go_perf_source = project_root.join("clients/go/examples/perf_client.go");
+    let go_client_dir = project_root.join("clients/go");
     
-    if !go_perf_bin.exists() {
-        info!("Building Go performance client...");
-        let status = Command::new("go")
-            .current_dir(&project_root)
-            .args(&["build", "-o", go_perf_bin.to_str().unwrap(), go_perf_source.to_str().unwrap()])
-            .status()
-            .context("failed to build Go client")?;
-        
-        if !status.success() {
-            anyhow::bail!("Go client build failed");
-        }
+    // Ensure target directory exists
+    if let Some(parent) = go_perf_bin.parent() {
+        std::fs::create_dir_all(parent)
+            .context("failed to create target directory")?;
+    }
+    
+    // Always rebuild to ensure it's up to date
+    info!("Building Go performance client...");
+    let go_bin = std::env::var("GO_BIN").unwrap_or_else(|_| "go".to_string());
+    let status = Command::new(&go_bin)
+        .current_dir(&go_client_dir)
+        .args(&["build", "-o", go_perf_bin.to_str().unwrap(), go_perf_source.to_str().unwrap()])
+        .status()
+        .context(format!("failed to build Go client (tried '{}')", go_bin))?;
+    
+    if !status.success() {
+        anyhow::bail!("Go client build failed");
     }
 
     // Run Go client

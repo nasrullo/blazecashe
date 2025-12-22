@@ -1102,7 +1102,15 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
         packet[4..8].copy_from_slice(&request_id.to_be_bytes());
         packet[8] = 0x04; // PING command
         
-        self.socket.send_to(&packet, &self.server_addr).await?;
+        // Parse server address (same as PUT)
+        let server_addr: std::net::SocketAddr = self.server_addr.parse()
+            .map_err(|e| format!("invalid server address '{}': {}", self.server_addr, e))?;
+        
+        let sent = self.socket.send_to(&packet, server_addr).await
+            .map_err(|e| format!("failed to send PING packet to {}: {}", server_addr, e))?;
+        if sent != packet.len() {
+            return Err(format!("PING partial send: sent {} of {} bytes", sent, packet.len()).into());
+        }
         
         // Use optimized response receiver
         let (status, _) = self.receive_single_response(request_id, Duration::from_secs(5)).await?;
@@ -1201,10 +1209,21 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
             packet.extend_from_slice(value);
             packet.extend_from_slice(&ttl.to_be_bytes());
             
-            self.socket.send_to(&packet, &self.server_addr).await?;
+            // Parse server address (same as PING)
+            let server_addr: std::net::SocketAddr = self.server_addr.parse()
+                .map_err(|e| format!("invalid server address '{}': {}", self.server_addr, e))?;
             
-            // Use optimized response receiver
+            // Send packet
+            let sent = self.socket.send_to(&packet, server_addr).await
+                .map_err(|e| format!("failed to send PUT packet to {}: {}", server_addr, e))?;
+            if sent != packet.len() {
+                return Err(format!("PUT partial send: sent {} of {} bytes", sent, packet.len()).into());
+            }
+            
+            // Use optimized response receiver with logging
+            info!("PUT: Waiting for response, request_id={}", request_id);
             let (status, _) = self.receive_single_response(request_id, Duration::from_secs(5)).await?;
+            info!("PUT: Received response, request_id={}, status={}", request_id, status);
             
             if status == 0x00 {
                 Ok(())

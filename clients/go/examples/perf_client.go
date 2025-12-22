@@ -29,17 +29,48 @@ func main() {
 	fmt.Printf("Duration: %d seconds\n", *duration)
 	fmt.Printf("Interval: %d seconds\n\n", *interval)
 
-	// Verify server connection
-	testClient, err := blazecache.NewUDPClient(*serverAddr)
-	if err != nil {
-		log.Fatalf("Failed to create UDP client: %v", err)
+	// Verify server connection with retries (similar to Rust client fix)
+	fmt.Println("Waiting for server to be ready...")
+	var testClient *blazecache.UDPClient
+	var err error
+	serverReady := false
+	for attempt := 1; attempt <= 10; attempt++ {
+		time.Sleep(500 * time.Millisecond)
+		testClient, err = blazecache.NewUDPClient(*serverAddr)
+		if err != nil {
+			fmt.Printf("Connection failed on attempt %d: %v (retrying...)\n", attempt, err)
+			continue
+		}
+		
+		// Try ping with timeout
+		pingDone := make(chan error, 1)
+		go func() {
+			pingDone <- testClient.Ping()
+		}()
+		
+		select {
+		case err := <-pingDone:
+			if err == nil {
+				fmt.Printf("✓ Server is ready (attempt %d)\n\n", attempt)
+				serverReady = true
+				break
+			}
+			fmt.Printf("Ping failed on attempt %d: %v (retrying...)\n", attempt, err)
+			testClient.Close()
+		case <-time.After(2 * time.Second):
+			fmt.Printf("Ping timeout on attempt %d (retrying...)\n", attempt)
+			testClient.Close()
+		}
+		
+		if serverReady {
+			break
+		}
+	}
+	
+	if !serverReady {
+		log.Fatalf("Server not ready after 10 attempts. Please ensure the server is running on %s", *serverAddr)
 	}
 	defer testClient.Close()
-
-	if err := testClient.Ping(); err != nil {
-		log.Fatalf("Server connection failed: %v", err)
-	}
-	fmt.Println("✓ Server connection verified\n")
 
 	start := time.Now()
 	var wg sync.WaitGroup
