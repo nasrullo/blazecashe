@@ -444,7 +444,7 @@ func (c *UDPClient) receiveResponse(requestID uint32) ([]byte, error) {
 		}
 		c.conn.SetReadDeadline(now.Add(remaining))
 
-		n, from, err := c.conn.ReadFromUDP(buffer)
+		n, _, err := c.conn.ReadFromUDP(buffer)
 		if err != nil {
 			// Check if it's a timeout
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
