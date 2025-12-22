@@ -13,13 +13,13 @@ import (
 
 // UDP protocol constants (matching Rust implementation)
 const (
-	UDP_MAGIC           = 0xBC01
-	UDP_VERSION         = 1
-	UDP_MAX_DATAGRAM    = 1200 // QUIC-safe MTU
-	UDP_MAX_PAYLOAD      = UDP_MAX_DATAGRAM - 14 // Fragment header size
-	UDP_MAX_MESSAGE_BYTES = 4 * 1024 * 1024      // 4MB max message
-	UDP_HEADER_LEN      = 14                     // Fragment header length
-	UDP_SINGLE_HEADER_LEN = 9                     // Single datagram header length
+	UDP_MAGIC              = 0xBC01
+	UDP_VERSION            = 1
+	UDP_MAX_DATAGRAM       = 1200                  // QUIC-safe MTU
+	UDP_MAX_PAYLOAD        = UDP_MAX_DATAGRAM - 14 // Fragment header size
+	UDP_MAX_MESSAGE_BYTES  = 4 * 1024 * 1024       // 4MB max message
+	UDP_HEADER_LEN         = 14                    // Fragment header length
+	UDP_SINGLE_HEADER_LEN  = 9                     // Single datagram header length
 	UDP_REASSEMBLY_TIMEOUT = 2 * time.Second
 	UDP_CLIENT_TIMEOUT     = 5 * time.Second
 )
@@ -56,7 +56,7 @@ func NewUDPClient(serverAddr string) (*UDPClient, error) {
 	}
 
 	// Set socket buffer sizes for high throughput (QUIC-like optimization)
-	conn.SetReadBuffer(4 * 1024 * 1024) // 4MB receive buffer
+	conn.SetReadBuffer(4 * 1024 * 1024)  // 4MB receive buffer
 	conn.SetWriteBuffer(4 * 1024 * 1024) // 4MB send buffer
 
 	return &UDPClient{
@@ -203,7 +203,8 @@ func decodeFragmentHeader(buf []byte) (msgType byte, requestID uint32, seqNo uin
 }
 
 // decodeSingleDatagram decodes a single-datagram message (QUIC fast path)
-func decodeSingleDatagram(buf []byte) (requestID uint32, command byte, data []byte, err error) {
+// Format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][STATUS:1][DATA:...]
+func decodeSingleDatagram(buf []byte) (requestID uint32, status byte, data []byte, err error) {
 	if len(buf) < UDP_SINGLE_HEADER_LEN {
 		return 0, 0, nil, errors.New("datagram too short")
 	}
@@ -226,17 +227,17 @@ func decodeSingleDatagram(buf []byte) (requestID uint32, command byte, data []by
 	}
 
 	requestID = binary.BigEndian.Uint32(buf[4:8])
-	command = buf[8]
-	data = buf[9:]
+	status = buf[8]  // Status byte (0x00=OK, 0x01=NOT_FOUND, 0x02=ERROR)
+	data = buf[9:]   // Data starts after status byte
 
-	return requestID, command, data, nil
+	return requestID, status, data, nil
 }
 
 // ReassemblyState tracks fragments for reassembly (QUIC datagram reassembly)
 type ReassemblyState struct {
-	fragCount    uint16
-	received     map[uint16][]byte
-	createdAt    time.Time
+	fragCount uint16
+	received  map[uint16][]byte
+	createdAt time.Time
 }
 
 // newReassemblyState creates a new reassembly state
@@ -335,7 +336,7 @@ func (c *UDPClient) Get(key string) ([]byte, error) {
 	if packetSize <= UDP_MAX_DATAGRAM {
 		// Single datagram - use fast path
 		packet := encodeSingleDatagram(requestID, 0x01, cmdData.Bytes())
-		
+
 		if _, err := c.conn.WriteToUDP(packet, c.serverAddr); err != nil {
 			return nil, fmt.Errorf("failed to send get request: %w", err)
 		}
@@ -354,6 +355,8 @@ func (c *UDPClient) Get(key string) ([]byte, error) {
 		if _, err := c.conn.WriteToUDP(fragment, c.serverAddr); err != nil {
 			return nil, fmt.Errorf("failed to send fragment: %w", err)
 		}
+		// Small delay between fragments to avoid overwhelming the network
+		time.Sleep(1 * time.Millisecond)
 	}
 
 	return c.receiveResponse(requestID)
@@ -388,7 +391,7 @@ func (c *UDPClient) Set(key string, value []byte, ttl uint32) error {
 	if packetSize <= UDP_MAX_DATAGRAM {
 		// Single datagram - use fast path
 		packet := encodeSingleDatagram(requestID, 0x02, cmdBytes)
-		
+
 		if _, err := c.conn.WriteToUDP(packet, c.serverAddr); err != nil {
 			return fmt.Errorf("failed to send set request: %w", err)
 		}
@@ -408,6 +411,8 @@ func (c *UDPClient) Set(key string, value []byte, ttl uint32) error {
 		if _, err := c.conn.WriteToUDP(fragment, c.serverAddr); err != nil {
 			return fmt.Errorf("failed to send fragment: %w", err)
 		}
+		// Small delay between fragments to avoid overwhelming the network
+		time.Sleep(1 * time.Millisecond)
 	}
 
 	_, err = c.receiveResponse(requestID)
@@ -429,10 +434,10 @@ func (c *UDPClient) receiveResponse(requestID uint32) ([]byte, error) {
 		}
 
 		// Try to decode as single datagram first (QUIC fast path)
-		recvRequestID, command, data, err := decodeSingleDatagram(buffer[:n])
+		recvRequestID, status, data, err := decodeSingleDatagram(buffer[:n])
 		if err == nil && recvRequestID == requestID {
 			// Single datagram response
-			return c.parseResponse(command, data)
+			return c.parseResponse(status, data)
 		}
 
 		// Try to decode as fragment
@@ -472,29 +477,41 @@ func (c *UDPClient) receiveResponse(requestID uint32) ([]byte, error) {
 			if len(completeData) < 1 {
 				return nil, errors.New("invalid response")
 			}
-			command := completeData[0]
-			return c.parseResponse(command, completeData[1:])
+			status := completeData[0]
+			return c.parseResponse(status, completeData[1:])
 		}
 	}
 }
 
 // parseResponse parses a response and returns the data or error
-func (c *UDPClient) parseResponse(command byte, data []byte) ([]byte, error) {
-	switch command {
+// Status byte meanings:
+//   0x00 = OK (with data for GET, no data for PUT)
+//   0x01 = NOT FOUND (no additional data)
+//   0x02 = ERROR (with error message)
+func (c *UDPClient) parseResponse(status byte, data []byte) ([]byte, error) {
+	switch status {
 	case 0x00: // OK
-		// Format: [DATA_LEN:4][DATA:bytes]
+		// For GET: Format is [VALUE_LEN:4][VALUE:bytes]
+		// For PUT: No data (empty response)
+		if len(data) == 0 {
+			return nil, nil // Empty response (PUT success)
+		}
+		// GET response with data
 		if len(data) < 4 {
 			return nil, errors.New("invalid response format")
 		}
 		dataLen := binary.BigEndian.Uint32(data[0:4])
 		if dataLen == 0 {
-			return nil, nil // Empty response
+			return nil, nil // Empty value
 		}
 		if len(data) < 4+int(dataLen) {
 			return nil, errors.New("incomplete response data")
 		}
 		return data[4 : 4+dataLen], nil
-	case 0x01: // ERROR
+	case 0x01: // NOT FOUND
+		// No additional data, just the status byte
+		return nil, errors.New("key not found")
+	case 0x02: // ERROR
 		// Format: [MSG_LEN:2][MSG:bytes]
 		if len(data) < 2 {
 			return nil, errors.New("invalid error response format")
@@ -504,14 +521,8 @@ func (c *UDPClient) parseResponse(command byte, data []byte) ([]byte, error) {
 			return nil, errors.New("incomplete error message")
 		}
 		msg := string(data[2 : 2+msgLen])
-		if msg == "not found" || msg == "key not found" {
-			return nil, errors.New("key not found")
-		}
 		return nil, errors.New("server error: " + msg)
-	case 0x02: // PONG
-		return nil, nil
 	default:
-		return nil, fmt.Errorf("unknown response command: %d", command)
+		return nil, fmt.Errorf("unknown response status: %d", status)
 	}
 }
-
