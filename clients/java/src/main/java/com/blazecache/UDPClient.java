@@ -358,13 +358,39 @@ public class UDPClient implements AutoCloseable {
             }
             
             // Check if single datagram or fragment
-            if (received.length >= UDP_HEADER_LEN) {
-                // Could be fragment - check if byte 8-9 look like seq_no
+            // Single datagram: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][STATUS:1][DATA:...]
+            // Fragment: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][SEQ:2][FRAG_COUNT:2][PAYLOAD_LEN:2][DATA:...]
+            // After reading flags and requestID, we're at position 8
+            // For single datagram, byte 8 is status (0x00-0x02)
+            // For fragment, bytes 8-9 are seq_no (could be 0-65535)
+            
+            if (received.length < UDP_SINGLE_HEADER_LEN) {
+                continue; // Too short for single datagram
+            }
+            
+            // Check byte 8 to determine if single datagram or fragment
+            byte byte8 = received[8];
+            
+            // If byte 8 is <= 0x02 and we have enough bytes, it's likely a single datagram
+            // (status codes are 0x00, 0x01, 0x02)
+            if (byte8 <= 0x02 && received.length >= UDP_SINGLE_HEADER_LEN) {
+                // Single datagram response
+                byte status = byte8;
+                byte[] data = Arrays.copyOfRange(received, UDP_SINGLE_HEADER_LEN, received.length);
+                
+                // Prepend status byte for consistency
+                byte[] response = new byte[1 + data.length];
+                response[0] = status;
+                System.arraycopy(data, 0, response, 1, data.length);
+                
+                return response;
+            } else if (received.length >= UDP_HEADER_LEN) {
+                // Likely fragment - decode fragment header
+                buf.position(8); // Reset to after requestID
                 short seqNo = buf.getShort();
                 short fragCount = buf.getShort();
                 
-                if (fragCount > 0 && seqNo < fragCount && received.length >= UDP_HEADER_LEN) {
-                    // It's a fragment
+                if (fragCount > 0 && seqNo < fragCount) {
                     short payloadLen = buf.getShort();
                     if (payloadLen > 0 && received.length >= UDP_HEADER_LEN + payloadLen) {
                         byte[] payload = new byte[payloadLen];
@@ -382,21 +408,7 @@ public class UDPClient implements AutoCloseable {
                             return reassembly.assemble();
                         }
                     }
-                    continue;
                 }
-            }
-            
-            // Single datagram response
-            if (received.length >= UDP_SINGLE_HEADER_LEN) {
-                byte status = received[UDP_SINGLE_HEADER_LEN - 1];
-                byte[] data = Arrays.copyOfRange(received, UDP_SINGLE_HEADER_LEN, received.length);
-                
-                // Prepend status byte for consistency
-                byte[] response = new byte[1 + data.length];
-                response[0] = status;
-                System.arraycopy(data, 0, response, 1, data.length);
-                
-                return response;
             }
         }
         
