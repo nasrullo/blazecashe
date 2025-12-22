@@ -546,9 +546,11 @@ impl<S: Serializer + 'static> UdpServer<S> {
             // (fragments have SEQ_NO in bytes 8-9, which is unlikely to be 0x01-0x04)
             if len >= 9 && len <= MAX_DATAGRAM {
                 let magic = u16::from_be_bytes([buffer[0], buffer[1]]);
+                info!("UDP packet received: len={}, magic=0x{:04x}, version={}, from={}", len, magic, buffer[2], addr);
                 if magic == MAGIC && buffer[2] == VERSION {
                     // Check if it's a single-datagram (command byte) vs fragmented (has SEQ/FRAG_COUNT)
                     let byte8 = buffer[8];
+                    info!("UDP packet: magic match, byte8=0x{:02x}", byte8);
                     // Fast path: single-datagram message
                     // Commands are 0x01 (GET), 0x02 (PUT), 0x03 (DELETE), 0x04 (PING)
                     // Fragments have SEQ_NO (0-65535) in bytes 8-9, so byte 8 alone can't be > 255
@@ -559,6 +561,7 @@ impl<S: Serializer + 'static> UdpServer<S> {
                         let request_id = u32::from_be_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
                         let cmd_byte = byte8;
                         let cmd_data = buffer[9..len].to_vec(); // Copy data before spawning
+                        info!("UDP single-datagram: request_id={}, cmd_byte=0x{:02x}, cmd_data_len={}", request_id, cmd_byte, cmd_data.len());
                         
                         // Handle single-datagram requests directly (fast path)
                         let _group = Arc::clone(&self.group);
@@ -627,8 +630,10 @@ impl<S: Serializer + 'static> UdpServer<S> {
                                         }
                                     }
                                     0x02 => { // PUT
+                                        info!("PUT request: cmd_data_len={}, request_id={}", cmd_data_spawn.len(), request_id_spawn);
                                         if cmd_data_spawn.len() >= 2 {
                                             let key_len = u16::from_be_bytes([cmd_data_spawn[0], cmd_data_spawn[1]]) as usize;
+                                            info!("PUT: key_len={}, remaining={}", key_len, cmd_data_spawn.len() - 2);
                                             if cmd_data_spawn.len() >= 2 + key_len + 4 {
                                                 if let Ok(key) = std::str::from_utf8(&cmd_data_spawn[2..2 + key_len]) {
                                                     let value_len = u32::from_be_bytes([
@@ -637,6 +642,7 @@ impl<S: Serializer + 'static> UdpServer<S> {
                                                         cmd_data_spawn[2 + key_len + 2],
                                                         cmd_data_spawn[2 + key_len + 3],
                                                     ]) as usize;
+                                                    info!("PUT: key={}, value_len={}, remaining={}", key, value_len, cmd_data_spawn.len() - 2 - key_len - 4);
                                                     if cmd_data_spawn.len() >= 2 + key_len + 4 + value_len + 4 {
                                                         let value = &cmd_data_spawn[2 + key_len + 4..2 + key_len + 4 + value_len];
                                                         let ttl = u32::from_be_bytes([
@@ -646,17 +652,28 @@ impl<S: Serializer + 'static> UdpServer<S> {
                                                             cmd_data_spawn[2 + key_len + 4 + value_len + 3],
                                                         ]);
                                                         
+                                                        info!("PUT: calling group.set(key={}, value_len={}, ttl={})", key, value_len, ttl);
                                                         match group_spawn.set(key, value.to_vec(), ttl).await {
                                                             Ok(_) => {
+                                                                info!("PUT: set successful, pushing 0x00");
                                                                 response.push(0x00); // Success
                                                             }
-                                                            Err(_) => {
+                                                            Err(e) => {
+                                                                warn!("PUT: set failed, error={}, pushing 0x02", e);
                                                                 response.push(0x02); // Error
                                                             }
                                                         }
+                                                    } else {
+                                                        warn!("PUT: insufficient data for value+ttl, cmd_data_len={}, needed={}", cmd_data_spawn.len(), 2 + key_len + 4 + value_len + 4);
                                                     }
+                                                } else {
+                                                    warn!("PUT: invalid UTF-8 key");
                                                 }
+                                            } else {
+                                                warn!("PUT: insufficient data for key+value_len, cmd_data_len={}, needed={}", cmd_data_spawn.len(), 2 + key_len + 4);
                                             }
+                                        } else {
+                                            warn!("PUT: cmd_data too short, len={}", cmd_data_spawn.len());
                                         }
                                     }
                                     _ => {
