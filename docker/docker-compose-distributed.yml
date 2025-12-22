@@ -69,8 +69,6 @@ services:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
       net.ipv4.tcp_tw_reuse: "1"
-      net.core.rmem_max: "134217728"
-      net.core.wmem_max: "134217728"
     volumes:
       - blazecache-dist-2-data:/var/lib/blazecache/data
     networks:
@@ -115,8 +113,6 @@ services:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
       net.ipv4.tcp_tw_reuse: "1"
-      net.core.rmem_max: "134217728"
-      net.core.wmem_max: "134217728"
     volumes:
       - blazecache-dist-3-data:/var/lib/blazecache/data
     networks:
@@ -161,8 +157,6 @@ services:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
       net.ipv4.tcp_tw_reuse: "1"
-      net.core.rmem_max: "134217728"
-      net.core.wmem_max: "134217728"
     volumes:
       - blazecache-dist-4-data:/var/lib/blazecache/data
     networks:
@@ -207,8 +201,6 @@ services:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
       net.ipv4.tcp_tw_reuse: "1"
-      net.core.rmem_max: "134217728"
-      net.core.wmem_max: "134217728"
     volumes:
       - blazecache-dist-5-data:/var/lib/blazecache/data
     networks:
