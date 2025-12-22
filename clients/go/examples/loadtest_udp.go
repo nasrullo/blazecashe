@@ -53,6 +53,7 @@ func main() {
 		go func(id int, numOps int) {
 			defer wg.Done()
 
+			// Create a new client for each worker to avoid socket conflicts
 			client, err := blazecache.NewUDPClient(*serverAddr)
 			if err != nil {
 				atomic.AddInt64(&totalErrors, int64(numOps*2)) // SET + GET
@@ -63,6 +64,7 @@ func main() {
 			var success int64
 			var errors int64
 
+			// Add small delay between operations to avoid overwhelming the server
 			for i := 0; i < numOps; i++ {
 				key := fmt.Sprintf("key-%d-%d", id, i)
 				value := []byte(fmt.Sprintf("value-%d-%d", id, i))
@@ -70,19 +72,33 @@ func main() {
 				// SET operation
 				if err := client.Set(key, value, 3600); err != nil {
 					errors++
+					// Log first few errors for debugging
+					if errors <= 3 {
+						fmt.Printf("Worker %d: SET error for key %s: %v\n", id, key, err)
+					}
 				} else {
 					success++
 				}
+
+				// Small delay to avoid overwhelming
+				time.Sleep(100 * time.Microsecond)
 
 				// GET operation
 				retrieved, err := client.Get(key)
 				if err != nil {
 					errors++
+					// Log first few errors for debugging
+					if errors <= 3 {
+						fmt.Printf("Worker %d: GET error for key %s: %v\n", id, key, err)
+					}
 				} else if string(retrieved) == string(value) {
 					success++
 				} else {
 					errors++
 				}
+
+				// Small delay between operations
+				time.Sleep(100 * time.Microsecond)
 			}
 
 			atomic.AddInt64(&totalSuccess, success)

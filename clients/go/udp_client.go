@@ -426,18 +426,23 @@ func (c *UDPClient) receiveResponse(requestID uint32) ([]byte, error) {
 	buffer := make([]byte, UDP_MAX_DATAGRAM)
 	attempts := 0
 
+	// Set initial read deadline
+	c.conn.SetReadDeadline(deadline)
+	defer c.conn.SetReadDeadline(time.Time{}) // Clear deadline when done
+
 	for {
-		// Check deadline
-		if time.Now().After(deadline) {
+		// Check deadline before reading
+		now := time.Now()
+		if now.After(deadline) {
 			return nil, fmt.Errorf("response timeout after %d attempts (request_id=%d)", attempts, requestID)
 		}
 
-		// Set read deadline with remaining time
-		remaining := time.Until(deadline)
+		// Update read deadline with remaining time
+		remaining := deadline.Sub(now)
 		if remaining <= 0 {
 			return nil, fmt.Errorf("response timeout after %d attempts (request_id=%d)", attempts, requestID)
 		}
-		c.conn.SetReadDeadline(time.Now().Add(remaining))
+		c.conn.SetReadDeadline(now.Add(remaining))
 
 		n, _, err := c.conn.ReadFromUDP(buffer)
 		if err != nil {
