@@ -19,7 +19,7 @@ services:
       - "6785"
     ports:
       - "6784:6784/tcp"  # TCP port
-      - "6793:6793/udp"  # UDP port
+      - "6793:6793/udp"  # UDP port (explicit UDP protocol)
       - "6785:6785/tcp"  # Gossip port
     sysctls:
       net.core.somaxconn: "4096"
