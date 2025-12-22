@@ -697,6 +697,7 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[allow(dead_code)]
     struct MockPeerSet {
         addr: String,
         set_called: AtomicBool,
@@ -729,6 +730,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     struct MockPeerPickerSet {
         peer: Arc<MockPeerSet>,
     }
@@ -743,11 +745,13 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     enum DeleteOutcome {
         Ok,
         NotFound,
     }
 
+    #[allow(dead_code)]
     struct MockPeerDelete {
         delete_called: AtomicBool,
         outcome: DeleteOutcome,
@@ -781,6 +785,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     struct MockPeerPickerDelete {
         peer: Arc<MockPeerDelete>,
     }
