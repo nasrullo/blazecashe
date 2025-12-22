@@ -4,7 +4,10 @@ use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let server_addr = std::env::var("SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:6790".to_string());
+    let server_addr_str = std::env::var("SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:6790".to_string());
+    // Parse comma-separated server addresses - use first one for connection test
+    let servers: Vec<String> = server_addr_str.split(',').map(|s| s.trim().to_string()).collect();
+    let first_server = servers.first().unwrap();
     let num_ops = std::env::var("NUM_OPS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -15,10 +18,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or(100);
 
     println!("=== UDP Client Load Test: {} operations with {} workers ===", num_ops, num_workers);
-    println!("Server: {}", server_addr);
+    println!("Servers: {:?}", servers);
 
-    // Verify server connection
-    let mut test_client: UdpClient<BinarySerializer> = ProtocolClient::connect(&server_addr).await?;
+    // Verify server connection (use first server)
+    let mut test_client: UdpClient<BinarySerializer> = ProtocolClient::connect(first_server).await?;
     match tokio::time::timeout(std::time::Duration::from_secs(5), test_client.ping()).await {
         Ok(Ok(_)) => println!("✓ Server connection verified\n"),
         Ok(Err(e)) => {
@@ -44,7 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             ops_per_worker
         };
 
-        let server_addr = server_addr.clone();
+        // Round-robin through servers for load distribution
+        let server_idx = worker_id % servers.len();
+        let server_addr = servers[server_idx].clone();
 
         let handle = tokio::spawn(async move {
             let mut client: UdpClient<BinarySerializer> = match ProtocolClient::connect(&server_addr).await {

@@ -4,7 +4,9 @@ use tokio::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server_addr = std::env::var("SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:6784".to_string());
+    let server_addr_str = std::env::var("SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:6784".to_string());
+    // Parse comma-separated server addresses
+    let servers: Vec<String> = server_addr_str.split(',').map(|s| s.trim().to_string()).collect();
     let num_ops = std::env::var("NUM_OPS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -15,9 +17,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(100);
 
     println!("=== Rust Client Load Test: {} operations with {} workers ===", num_ops, num_workers);
+    println!("Servers: {:?}", servers);
 
     // Verify server connection
-    let test_client = TcpClient::new(vec![server_addr.to_string()]);
+    let test_client = TcpClient::new(servers.clone());
     match test_client.ping().await {
         Ok(_) => println!("✓ Server connection verified\n"),
         Err(e) => {
@@ -40,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let client = TcpClient::with_strategy(
-            vec![server_addr.to_string()],
+            servers.clone(),
             SelectionStrategy::RoundRobin,
         );
 
