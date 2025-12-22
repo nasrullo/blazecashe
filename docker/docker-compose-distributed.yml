@@ -18,9 +18,9 @@ services:
       - "--gossip-port"
       - "6785"
     ports:
-      - "6784:6784"  # TCP port
-      - "6793:6793"  # UDP port
-      - "6785:6785"  # Gossip port
+      - "6784:6784/tcp"  # TCP port
+      - "6793:6793/udp"  # UDP port
+      - "6785:6785/tcp"  # Gossip port
     sysctls:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
@@ -62,9 +62,9 @@ services:
       - "--gossip-port"
       - "6785"
     ports:
-      - "6786:6784"  # TCP port (mapped to different host port)
-      - "6794:6793"  # UDP port (mapped to different host port)
-      - "6787:6785"  # Gossip port (mapped to different host port)
+      - "6786:6784/tcp"  # TCP port (mapped to different host port)
+      - "6794:6793/udp"  # UDP port (mapped to different host port)
+      - "6787:6785/tcp"  # Gossip port (mapped to different host port)
     sysctls:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
@@ -106,9 +106,9 @@ services:
       - "--gossip-port"
       - "6785"
     ports:
-      - "6788:6784"  # TCP port
-      - "6795:6793"  # UDP port
-      - "6789:6785"  # Gossip port
+      - "6788:6784/tcp"  # TCP port
+      - "6795:6793/udp"  # UDP port
+      - "6789:6785/tcp"  # Gossip port
     sysctls:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
@@ -150,9 +150,9 @@ services:
       - "--gossip-port"
       - "6785"
     ports:
-      - "6790:6784"  # TCP port
-      - "6796:6793"  # UDP port
-      - "6791:6785"  # Gossip port
+      - "6790:6784/tcp"  # TCP port
+      - "6796:6793/udp"  # UDP port
+      - "6791:6785/tcp"  # Gossip port
     sysctls:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
@@ -194,9 +194,9 @@ services:
       - "--gossip-port"
       - "6785"
     ports:
-      - "6792:6784"  # TCP port
-      - "6797:6793"  # UDP port
-      - "6798:6785"  # Gossip port (changed from 6793 to avoid conflict)
+      - "6792:6784/tcp"  # TCP port
+      - "6797:6793/udp"  # UDP port
+      - "6798:6785/tcp"  # Gossip port (changed from 6793 to avoid conflict)
     sysctls:
       net.core.somaxconn: "4096"
       net.ipv4.tcp_max_syn_backlog: "4096"
