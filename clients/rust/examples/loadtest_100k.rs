@@ -4,9 +4,15 @@ use tokio::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let server_addr = "127.0.0.1:6792";
-    let num_ops = 100_000;
-    let num_workers = 100;
+    let server_addr = std::env::var("SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:6784".to_string());
+    let num_ops = std::env::var("NUM_OPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100_000);
+    let num_workers = std::env::var("NUM_WORKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100);
 
     println!("=== Rust Client Load Test: {} operations with {} workers ===", num_ops, num_workers);
 
