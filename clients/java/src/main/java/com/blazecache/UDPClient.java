@@ -96,7 +96,7 @@ public class UDPClient implements AutoCloseable {
     public Optional<byte[]> get(String key) throws IOException {
         byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] requestData = encodeCommand(CMD_GET, keyBytes, null);
-        byte[] response = sendRequest(requestData);
+        byte[] response = sendRequest(CMD_GET, requestData);
         
         if (response.length == 0) {
             return Optional.empty();
@@ -143,7 +143,7 @@ public class UDPClient implements AutoCloseable {
     public void set(String key, byte[] value, int ttlSeconds) throws IOException {
         byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] requestData = encodeCommand(CMD_PUT, keyBytes, value, ttlSeconds);
-        byte[] response = sendRequest(requestData);
+        byte[] response = sendRequest(CMD_PUT, requestData);
         
         if (response.length == 0 || response[0] != STATUS_OK) {
             throw new IOException("PUT failed with status: " + 
@@ -161,7 +161,7 @@ public class UDPClient implements AutoCloseable {
     public boolean delete(String key) throws IOException {
         byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] requestData = encodeCommand(CMD_DELETE, keyBytes, null);
-        byte[] response = sendRequest(requestData);
+        byte[] response = sendRequest(CMD_DELETE, requestData);
         
         if (response.length == 0) {
             return false;
@@ -182,8 +182,8 @@ public class UDPClient implements AutoCloseable {
      * @throws IOException if the ping fails
      */
     public void ping() throws IOException {
-        byte[] requestData = encodeCommand(CMD_PING, null, null);
-        byte[] response = sendRequest(requestData);
+        byte[] requestData = encodeCommand(CMD_PING, null, null); // Empty data for PING
+        byte[] response = sendRequest(CMD_PING, requestData);
         
         if (response.length == 0 || response[0] != STATUS_OK) {
             throw new IOException("PING failed");
@@ -212,13 +212,13 @@ public class UDPClient implements AutoCloseable {
     }
     
     private byte[] encodeCommand(byte command, byte[] key, byte[] value, int ttl) {
+        // For single datagram, the command byte goes at position 8 (after header)
+        // So we return just the command data (without command byte for single datagram)
+        // The command byte will be placed directly in sendSingleDatagram
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(baos);
         
         try {
-            // Command byte
-            dos.writeByte(command);
-            
             // Key length (2 bytes) + key
             if (key != null) {
                 dos.writeShort(key.length);
@@ -238,19 +238,24 @@ public class UDPClient implements AutoCloseable {
         return baos.toByteArray();
     }
     
-    private byte[] sendRequest(byte[] requestData) throws IOException {
+    private byte[] sendRequest(byte command, byte[] requestData) throws IOException {
         long reqID = nextRequestID();
         
         // Check if message fits in single datagram (fast path)
-        if (requestData.length <= UDP_MAX_PAYLOAD - 1) { // -1 for command byte in single header
-            return sendSingleDatagram(reqID, requestData);
+        if (requestData.length <= UDP_MAX_PAYLOAD) {
+            return sendSingleDatagram(reqID, command, requestData);
         } else {
-            return sendFragmented(reqID, requestData);
+            // For fragmented, we need to include command byte in the data
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            baos.write(command);
+            baos.write(requestData, 0, requestData.length);
+            return sendFragmented(reqID, baos.toByteArray());
         }
     }
     
-    private byte[] sendSingleDatagram(long reqID, byte[] data) throws IOException {
-        // Format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][CMD_DATA:...]
+    private byte[] sendSingleDatagram(long reqID, byte command, byte[] data) throws IOException {
+        // Format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][CMD:1][DATA:...]
+        // The server expects the command byte at position 8 (after request ID)
         ByteBuffer packet = ByteBuffer.allocate(UDP_SINGLE_HEADER_LEN + data.length)
             .order(ByteOrder.BIG_ENDIAN);
         
@@ -258,7 +263,8 @@ public class UDPClient implements AutoCloseable {
         packet.put(UDP_VERSION);
         packet.put(UDP_FLAG_REQUEST);
         packet.putInt((int) reqID);
-        packet.put(data);
+        packet.put(command); // Command byte at position 8
+        packet.put(data); // Command data after command byte
         
         byte[] packetBytes = packet.array();
         DatagramPacket datagram = new DatagramPacket(
