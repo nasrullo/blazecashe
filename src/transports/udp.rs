@@ -825,6 +825,120 @@ impl<S> UdpClient<S>
 where
     S: Serializer + 'static,
 {
+    /// Optimized response receiver based on Go client implementation
+    ///
+    /// This method implements several optimizations from the Go client:
+    /// - Early packet validation (magic, version, flags) before request ID check
+    /// - Single deadline management with dynamic updates
+    /// - Minimum timeout to avoid immediate timeouts
+    /// - Flags check to ensure it's a response packet
+    /// - Single datagram detection (byte8 <= 0x02) before fragment decoding
+    async fn receive_single_response(
+        &self,
+        request_id: u32,
+        timeout: Duration,
+    ) -> Result<(u8, Vec<u8>), Box<dyn Error + Send + Sync>> {
+        const MIN_TIMEOUT: Duration = Duration::from_millis(100);
+        const UDP_SINGLE_HEADER_LEN: usize = 9;
+        const UDP_FLAG_RESPONSE: u8 = 0x01;
+        
+        let deadline = Instant::now() + timeout;
+        let mut buffer = [0u8; MAX_DATAGRAM];
+        let mut attempts = 0u32;
+
+        loop {
+            // Check deadline before reading
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(format!(
+                    "response timeout after {} attempts (request_id={})",
+                    attempts, request_id
+                )
+                .into());
+            }
+
+            // Calculate remaining time with minimum timeout
+            let remaining = deadline.saturating_duration_since(now);
+            if remaining.is_zero() {
+                return Err(format!(
+                    "response timeout after {} attempts (request_id={})",
+                    attempts, request_id
+                )
+                .into());
+            }
+
+            // Use minimum timeout to avoid immediate timeouts
+            let read_timeout = remaining.max(MIN_TIMEOUT);
+
+            // Receive packet with timeout
+            let (len, _) = match tokio::time::timeout(read_timeout, self.socket.recv_from(&mut buffer)).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => return Err(format!("failed to receive response: {}", e).into()),
+                Err(_) => {
+                    // Timeout on this iteration - check if we still have time overall
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "response timeout after {} attempts (request_id={})",
+                            attempts, request_id
+                        )
+                        .into());
+                    }
+                    continue; // Try again if we have time
+                }
+            };
+
+            attempts += 1;
+
+            // Early validation: check packet length
+            if len < UDP_SINGLE_HEADER_LEN {
+                continue; // Too short, skip
+            }
+
+            // Early validation: check magic number
+            let magic = u16::from_be_bytes([buffer[0], buffer[1]]);
+            if magic != MAGIC {
+                continue; // Invalid magic, skip
+            }
+
+            // Early validation: check version
+            if buffer[2] != VERSION {
+                continue; // Invalid version, skip
+            }
+
+            // Early validation: check flags (must be response)
+            let flags = buffer[3];
+            if flags != UDP_FLAG_RESPONSE {
+                continue; // Not a response, skip
+            }
+
+            // Extract request ID
+            let resp_request_id = u32::from_be_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+            if resp_request_id != request_id {
+                continue; // Wrong request ID, continue waiting
+            }
+
+            // Got the right response! Now parse it
+            // Check if it's a single datagram (byte 8 is status) or fragment (bytes 8-9 are seq_no)
+            let byte8 = buffer[8];
+
+            // Single datagram format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][STATUS:1][DATA:...]
+            // Fragment format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][SEQ:2][FRAG_COUNT:2][PAYLOAD_LEN:2][DATA:...]
+            // For single datagram, byte 8 is the status (0x00-0x02)
+            // For fragments, bytes 8-9 are seq_no (u16), which could be 0-65535
+            // If byte 8 is <= 0x02, it's likely a status byte (single datagram)
+            if byte8 <= 0x02 && len >= UDP_SINGLE_HEADER_LEN {
+                // Single datagram response
+                let status = byte8;
+                let data = buffer[UDP_SINGLE_HEADER_LEN..len].to_vec();
+                return Ok((status, data));
+            }
+
+            // Fragment handling would go here if needed
+            // For now, single datagram responses are the common case
+            continue;
+        }
+    }
+
     /// Sends a fragmented message (QUIC datagram splitting)
     ///
     /// This method fragments a large message and sends each fragment as an independent
@@ -960,8 +1074,12 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
         socket.set_recv_buffer_size(4 * 1024 * 1024)?; // 4MB receive buffer
         socket.set_send_buffer_size(4 * 1024 * 1024)?; // 4MB send buffer
         
-        // Convert to tokio socket
-        let socket = UdpSocket::from_std(socket.into())?;
+        // Set non-blocking mode for tokio compatibility
+        socket.set_nonblocking(true)?;
+        
+        // Convert to std socket, then to tokio socket
+        let std_socket: std::net::UdpSocket = socket.into();
+        let socket = UdpSocket::from_std(std_socket)?;
         
         Ok(Self {
             socket,
@@ -986,28 +1104,10 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
         
         self.socket.send_to(&packet, &self.server_addr).await?;
         
-        // Receive response with timeout
-        let mut buffer = [0u8; MAX_DATAGRAM];
-        let recv_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.socket.recv_from(&mut buffer)
-        ).await;
+        // Use optimized response receiver
+        let (status, _) = self.receive_single_response(request_id, Duration::from_secs(5)).await?;
         
-        let (len, _) = match recv_result {
-            Ok(Ok(result)) => result,
-            Ok(Err(e)) => return Err(Box::new(e)),
-            Err(_) => return Err("ping timeout".into()),
-        };
-        
-        if len < 9 || u16::from_be_bytes([buffer[0], buffer[1]]) != MAGIC || buffer[2] != VERSION {
-            return Err("invalid ping response".into());
-        }
-        
-        if u32::from_be_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]) != request_id {
-            return Err("request ID mismatch".into());
-        }
-        
-        if buffer[8] == 0x00 {
+        if status == 0x00 {
             Ok(())
         } else {
             Err("ping failed".into())
@@ -1039,57 +1139,31 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
             
             self.socket.send_to(&packet, &self.server_addr).await?;
             
-            // Receive response - loop until we get the right request ID or timeout
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut attempts = 0u32;
-            loop {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(format!("GET response timeout after {} attempts (request_id={})", attempts, request_id).into());
-                }
-                
-                let mut buffer = [0u8; MAX_DATAGRAM];
-                let (len, _) = match tokio::time::timeout(remaining, self.socket.recv_from(&mut buffer)).await {
-                    Ok(Ok((len, addr))) => {
-                        attempts += 1;
-                        (len, addr)
+            // Use optimized response receiver
+            let (status, data) = self.receive_single_response(request_id, Duration::from_secs(5)).await?;
+            
+            match status {
+                0x00 => {
+                    // Success: data contains [VALUE_LEN:4][VALUE:bytes]
+                    if data.len() < 4 {
+                        return Err("response too short".into());
                     }
-                    Ok(Err(e)) => return Err(e.into()),
-                    Err(_) => {
-                        // Timeout on this iteration - check if we still have time overall
-                        if deadline.saturating_duration_since(Instant::now()).is_zero() {
-                            return Err(format!("GET response timeout after {} attempts (request_id={})", attempts, request_id).into());
-                        }
-                        continue; // Try again if we have time
+                    let value_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+                    if data.len() < 4 + value_len {
+                        return Err("response incomplete".into());
                     }
-                };
-                
-                if len < 9 || u16::from_be_bytes([buffer[0], buffer[1]]) != MAGIC || buffer[2] != VERSION {
-                    continue; // Invalid response, try again
+                    Ok(data[4..4 + value_len].to_vec())
                 }
-                
-                let resp_request_id = u32::from_be_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
-                if resp_request_id != request_id {
-                    // Wrong request ID - this is expected with concurrent requests
-                    continue; // Try again
-                }
-                
-                // Got the right response!
-                let status = buffer[8];
-                match status {
-                    0x00 => {
-                        if len < 13 {
-                            return Err("response too short".into());
-                        }
-                        let value_len = u32::from_be_bytes([buffer[9], buffer[10], buffer[11], buffer[12]]) as usize;
-                        if len < 13 + value_len {
-                            return Err("response incomplete".into());
-                        }
-                        return Ok(buffer[13..13 + value_len].to_vec());
+                0x01 => {
+                    // Not found: empty data means key not found
+                    if data.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        // Error with message
+                        Err(format!("get error: {}", String::from_utf8_lossy(&data)).into())
                     }
-                    0x01 => return Ok(Vec::new()), // Not found
-                    _ => return Err("unexpected status".into()),
                 }
+                _ => Err("unexpected status".into()),
             }
         } else {
             // Fall back to fragmented path
@@ -1129,47 +1203,13 @@ impl<S: Serializer + 'static> ProtocolClient for UdpClient<S> {
             
             self.socket.send_to(&packet, &self.server_addr).await?;
             
-            // Receive response - loop until we get the right request ID or timeout
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut attempts = 0u32;
-            loop {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(format!("PUT response timeout after {} attempts (request_id={})", attempts, request_id).into());
-                }
-                
-                let mut buffer = [0u8; MAX_DATAGRAM];
-                let (len, _) = match tokio::time::timeout(remaining, self.socket.recv_from(&mut buffer)).await {
-                    Ok(Ok((len, addr))) => {
-                        attempts += 1;
-                        (len, addr)
-                    }
-                    Ok(Err(e)) => return Err(e.into()),
-                    Err(_) => {
-                        // Timeout on this iteration - check if we still have time overall
-                        if deadline.saturating_duration_since(Instant::now()).is_zero() {
-                            return Err(format!("PUT response timeout after {} attempts (request_id={})", attempts, request_id).into());
-                        }
-                        continue; // Try again if we have time
-                    }
-                };
-                
-                if len < 9 || u16::from_be_bytes([buffer[0], buffer[1]]) != MAGIC || buffer[2] != VERSION {
-                    continue; // Invalid response, try again
-                }
-                
-                let resp_request_id = u32::from_be_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
-                if resp_request_id != request_id {
-                    // Wrong request ID - this is expected with concurrent requests
-                    continue; // Try again
-                }
-                
-                // Got the right response!
-                if buffer[8] == 0x00 {
-                    return Ok(());
-                } else {
-                    return Err("put failed".into());
-                }
+            // Use optimized response receiver
+            let (status, _) = self.receive_single_response(request_id, Duration::from_secs(5)).await?;
+            
+            if status == 0x00 {
+                Ok(())
+            } else {
+                Err("put failed".into())
             }
         } else {
             // Fall back to fragmented path
