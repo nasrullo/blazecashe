@@ -9,7 +9,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server_addrs_str = std::env::var("SERVER_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:6793".to_string());
     let server_addrs: Vec<String> = server_addrs_str.split(',').map(|s| s.trim().to_string()).collect();
-    let server_addr = server_addrs[0].clone(); // Use first server for connection
     
     // Get number of operations from environment or use default
     let num_ops = std::env::var("NUM_OPS")
@@ -24,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or(100);
 
     println!("=== UDP (QUIC) Client Load Test: {} operations with {} workers ===", num_ops, num_workers);
-    println!("Server: {}", server_addr);
+    println!("Servers: {:?}", server_addrs);
     println!();
 
     let start = Instant::now();
@@ -40,10 +39,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             ops_per_worker
         };
 
-        let server_addr = server_addr.clone();
+        // Distribute workers across available servers
+        let worker_server_addr = server_addrs[worker_id % server_addrs.len()].clone();
 
         let handle = tokio::spawn(async move {
-            let mut client: UdpClient<BinarySerializer> = match ProtocolClient::connect(&server_addr).await {
+            let mut client: UdpClient<BinarySerializer> = match ProtocolClient::connect(&worker_server_addr).await {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("Worker {}: Failed to connect: {}", worker_id, e);
