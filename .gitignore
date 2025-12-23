@@ -1,2 +1,4 @@
 /target
 perf/target/
+/clients/java/build/
+/clients/java/target/
