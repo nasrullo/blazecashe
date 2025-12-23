@@ -6,6 +6,7 @@ use std::path::Path;
 pub struct AppConfig {
     pub port: u16,
     pub udp_port: Option<u16>,
+    pub tls_port: Option<u16>,
     pub memory_mb: usize,
     pub daemon: bool,
     pub log_level: Option<String>,
@@ -87,6 +88,7 @@ impl Default for AppConfig {
         Self {
             port: 6784,
             udp_port: None,
+            tls_port: None,
             memory_mb: 64,
             daemon: false,
             log_level: None,
@@ -279,6 +281,14 @@ fn apply_cli(cfg: &mut AppConfig, args: &[String]) {
                 if i + 1 < args.len() {
                     if let Ok(val) = args[i + 1].parse() {
                         cfg.udp_port = Some(val);
+                    }
+                    i += 1;
+                }
+            }
+            "--tls-port" => {
+                if i + 1 < args.len() {
+                    if let Ok(val) = args[i + 1].parse() {
+                        cfg.tls_port = Some(val);
                     }
                     i += 1;
                 }

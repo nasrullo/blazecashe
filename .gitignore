@@ -2,3 +2,4 @@
 perf/target/
 /clients/java/build/
 /clients/java/target/
+/clients/rust/target/

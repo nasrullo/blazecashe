@@ -38,6 +38,11 @@ fastrand = "2.0"
 chrono = "0.4.42"
 toml = "0.8"
 pprof = { version = "0.13", features = ["flamegraph", "protobuf"] }
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2.1"
+rustls-native-certs = "0.7"
+rcgen = "0.13"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }

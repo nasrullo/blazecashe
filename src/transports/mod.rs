@@ -1,5 +1,6 @@
 pub mod common;
 pub mod tcp;
+pub mod tcp_tls;
 pub mod udp;
 
 use crate::cache::{Group, Value};
@@ -9,6 +10,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 pub use common::{Command, ProtocolClient, ProtocolServer, Response};
 pub use tcp::{Serializer, TcpClient, TcpServer};
+pub use tcp_tls::{TlsTcpClient, TlsTcpServer};
 pub use udp::{UdpClient, UdpServer};
 
 // Common connection handler to avoid TCP/UDP duplication

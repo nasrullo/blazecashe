@@ -6,6 +6,7 @@ use blazecache::transports::ProtocolServer;
 use blazecache::utils::persistence::{PersistenceConfig, PersistenceManager};
 use blazecache::utils::config::AppConfig;
 use blazecache::{BlazeCacheError, Getter, Group, TcpServer, UdpServer};
+use blazecache::transports::TlsTcpServer;
 use std::env;
 use std::process::Command;
 use std::sync::Arc;
@@ -91,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Start UDP server if UDP port is configured
     if let Some(udp_port) = config.udp_port {
-        let udp_server = UdpServer::<BinarySerializer>::with_persistence(Arc::clone(&group), persistence_manager);
+        let udp_server = UdpServer::<BinarySerializer>::with_persistence(Arc::clone(&group), persistence_manager.clone());
         let udp_port_clone = udp_port;
         tokio::spawn(async move {
             info!(port = udp_port_clone, "Starting UDP server...");
@@ -105,6 +106,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         });
         info!(port = udp_port, "UDP server enabled");
+    }
+
+    // Start TLS TCP server if TLS port is configured
+    if let Some(tls_port) = config.tls_port {
+        let tls_server = match TlsTcpServer::<BinarySerializer>::with_persistence(Arc::clone(&group), persistence_manager.clone())
+            .with_auto_certificate() {
+            Ok(server) => server,
+            Err(e) => {
+                error!(error = %e, "Failed to create TLS server");
+                return Err(e);
+            }
+        };
+        let tls_port_clone = tls_port;
+        tokio::spawn(async move {
+            info!(port = tls_port_clone, "Starting TLS TCP server...");
+            match tls_server.start(tls_port_clone).await {
+                Ok(_) => {
+                    error!("TLS TCP server exited unexpectedly");
+                }
+                Err(e) => {
+                    error!(error = %e, "TLS TCP server error");
+                }
+            }
+        });
+        info!(port = tls_port, "TLS TCP server enabled");
     }
 
     // Keep main thread alive
