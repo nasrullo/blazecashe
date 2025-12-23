@@ -1,0 +1,173 @@
+version: '3.8'
+
+services:
+  # BlazeCache server 1
+  blazecache-server-1:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: blazecache-java-udp-server-1
+    hostname: blazecache-java-udp-server-1
+    network_mode: host
+    command: 
+      - "blazecache"
+      - "--port"
+      - "6784"
+      - "--udp-port"
+      - "6793"
+      - "--wal"
+      - "--data-dir"
+      - "/var/lib/blazecache/data"
+    volumes:
+      - blazecache-java-udp-data-1:/var/lib/blazecache/data
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 200000
+        hard: 200000
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 6784 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    environment:
+      - RUST_LOG=info
+
+  # BlazeCache server 2
+  blazecache-server-2:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: blazecache-java-udp-server-2
+    hostname: blazecache-java-udp-server-2
+    network_mode: host
+    command: 
+      - "blazecache"
+      - "--port"
+      - "6785"
+      - "--udp-port"
+      - "6794"
+      - "--wal"
+      - "--data-dir"
+      - "/var/lib/blazecache/data"
+    volumes:
+      - blazecache-java-udp-data-2:/var/lib/blazecache/data
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 200000
+        hard: 200000
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 6786 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    environment:
+      - RUST_LOG=info
+
+  # BlazeCache server 3
+  blazecache-server-3:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: blazecache-java-udp-server-3
+    hostname: blazecache-java-udp-server-3
+    network_mode: host
+    command: 
+      - "blazecache"
+      - "--port"
+      - "6786"
+      - "--udp-port"
+      - "6795"
+      - "--wal"
+      - "--data-dir"
+      - "/var/lib/blazecache/data"
+    volumes:
+      - blazecache-java-udp-data-3:/var/lib/blazecache/data
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 200000
+        hard: 200000
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 6784 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    environment:
+      - RUST_LOG=info
+
+  # Java UDP Load Test Client 1 (connects to server 1)
+  loadtest-java-udp-1:
+    build:
+      context: ../clients/java
+      dockerfile: Dockerfile.loadtest
+    container_name: loadtest-java-udp-1
+    depends_on:
+      - blazecache-server-1
+    network_mode: host
+    environment:
+      - SERVER_ADDR=127.0.0.1:6793
+      - CONCURRENCY=100
+      - VALUE_SIZE=1024
+      - DURATION=60
+      - INTERVAL=5
+    command: ["java", "-cp", "/app/classes", "com.blazecache.UDPLoadTest", 
+               "--server", "127.0.0.1:6793",
+               "--concurrency", "100",
+               "--value-size", "1024",
+               "--duration", "60",
+               "--interval", "5"]
+
+  # Java UDP Load Test Client 2 (connects to server 2)
+  loadtest-java-udp-2:
+    build:
+      context: ../clients/java
+      dockerfile: Dockerfile.loadtest
+    container_name: loadtest-java-udp-2
+    depends_on:
+      - blazecache-server-2
+    network_mode: host
+    environment:
+      - SERVER_ADDR=127.0.0.1:6794
+      - CONCURRENCY=100
+      - VALUE_SIZE=1024
+      - DURATION=60
+      - INTERVAL=5
+    command: ["java", "-cp", "/app/classes", "com.blazecache.UDPLoadTest", 
+               "--server", "127.0.0.1:6794",
+               "--concurrency", "100",
+               "--value-size", "1024",
+               "--duration", "60",
+               "--interval", "5"]
+
+  # Java UDP Load Test Client 3 (connects to server 3)
+  loadtest-java-udp-3:
+    build:
+      context: ../clients/java
+      dockerfile: Dockerfile.loadtest
+    container_name: loadtest-java-udp-3
+    depends_on:
+      - blazecache-server-3
+    network_mode: host
+    environment:
+      - SERVER_ADDR=127.0.0.1:6795
+      - CONCURRENCY=100
+      - VALUE_SIZE=1024
+      - DURATION=60
+      - INTERVAL=5
+    command: ["java", "-cp", "/app/classes", "com.blazecache.UDPLoadTest", 
+               "--server", "127.0.0.1:6795",
+               "--concurrency", "100",
+               "--value-size", "1024",
+               "--duration", "60",
+               "--interval", "5"]
+
+volumes:
+  blazecache-java-udp-data-1:
+  blazecache-java-udp-data-2:
+  blazecache-java-udp-data-3:
+

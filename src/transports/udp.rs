@@ -582,7 +582,14 @@ impl<S: Serializer + 'static> UdpServer<S> {
                             response.push(0x00); // Success
                             
                             if response.len() <= MAX_DATAGRAM {
-                                let _ = socket.send_to(&response, addr).await;
+                                match socket.send_to(&response, addr).await {
+                                    Ok(n) => {
+                                        info!("Sent PING response for request_id={}, len={}, to={}", request_id, n, addr);
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to send PING response for request_id={}, error={}", request_id, e);
+                                    }
+                                }
                             }
                             continue;
                         }

@@ -1,0 +1,24 @@
+FROM eclipse-temurin:21-jdk AS builder
+
+WORKDIR /app
+
+# Copy Java source files
+COPY src/main/java /app/src
+
+# Compile Java classes (only what's needed for UDP load test)
+RUN mkdir -p /app/target/classes && \
+    javac -d /app/target/classes -sourcepath /app/src \
+        /app/src/com/blazecache/UDPClient.java \
+        /app/src/com/blazecache/UDPLoadTest.java \
+        /app/src/com/blazecache/TestUDPSimple.java
+
+FROM eclipse-temurin:21-jre
+
+WORKDIR /app
+
+# Copy compiled classes
+COPY --from=builder /app/target/classes /app/classes
+
+# Default command runs the UDP load test
+CMD ["java", "-cp", "/app/classes", "com.blazecache.UDPLoadTest"]
+

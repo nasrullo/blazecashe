@@ -67,9 +67,13 @@ public class UDPClient implements AutoCloseable {
             throw new IllegalArgumentException("Invalid server address format: " + serverAddr);
         }
         
-        this.serverAddr = new InetSocketAddress(parts[0], Integer.parseInt(parts[1]));
+        // Force IPv4 resolution (like Go client)
+        InetAddress addr = InetAddress.getByName(parts[0]);
+        this.serverAddr = new InetSocketAddress(addr, Integer.parseInt(parts[1]));
         
-        // Create UDP socket with optimized settings
+        // Create UDP socket with optimized settings (bind to any available port)
+        // Like Go client, we bind to a local port so server can send responses back
+        // Use the same approach as debug program: create socket and let it bind to a random port
         this.socket = new DatagramSocket();
         this.socket.setSoTimeout((int) UDP_CLIENT_TIMEOUT_MS);
         
@@ -79,6 +83,14 @@ public class UDPClient implements AutoCloseable {
             this.socket.setSendBufferSize(4 * 1024 * 1024); // 4MB send buffer
         } catch (SocketException e) {
             // Ignore if system doesn't support large buffers
+        }
+        
+        // Small delay to ensure socket is ready (like Rust client)
+        // Increased delay for Docker networking to stabilize
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
         
         // Start cleanup task for expired reassembly entries
@@ -272,6 +284,14 @@ public class UDPClient implements AutoCloseable {
         
         socket.send(datagram);
         
+        // Small delay to ensure packet is sent before waiting for response
+        // This helps ensure the socket is ready to receive
+        try {
+            Thread.sleep(1);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        
         return receiveResponse(reqID, false);
     }
     
@@ -319,56 +339,89 @@ public class UDPClient implements AutoCloseable {
         ReassemblyState reassembly = fragmented ? new ReassemblyState() : null;
         byte[] buffer = new byte[UDP_MAX_DATAGRAM];
         
+        // Clean up any expired reassembly states before starting
+        cleanupExpiredReassembly();
+        
+        // Reset socket timeout to default before starting to receive
+        try {
+            socket.setSoTimeout((int) UDP_CLIENT_TIMEOUT_MS);
+        } catch (SocketException e) {
+            throw new IOException("Socket error: " + e.getMessage(), e);
+        }
+        
         while (System.currentTimeMillis() < deadline) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
                 break;
             }
             
-            socket.setSoTimeout((int) Math.min(remaining, UDP_CLIENT_TIMEOUT_MS));
+            // Set timeout for this receive attempt
+            // Use a reasonable minimum timeout (100ms) to avoid too many iterations
+            int timeoutMs = (int) Math.max(Math.min(remaining, UDP_CLIENT_TIMEOUT_MS), 100);
+            try {
+                socket.setSoTimeout(timeoutMs);
+            } catch (SocketException e) {
+                // Socket might be closed, break out
+                break;
+            }
             
             DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
             try {
                 socket.receive(packet);
             } catch (SocketTimeoutException e) {
+                // Timeout on this iteration - check if we still have time overall
+                if (System.currentTimeMillis() >= deadline) {
+                    break;
+                }
                 continue;
+            } catch (SocketException e) {
+                // Socket error, break out
+                throw new IOException("Socket error while receiving: " + e.getMessage(), e);
             }
             
             byte[] received = Arrays.copyOf(packet.getData(), packet.getLength());
             
-            // Check if it's a single datagram or fragment
+            // Early validation: check packet length
             if (received.length < UDP_SINGLE_HEADER_LEN) {
-                continue; // Too short
+                continue; // Too short, skip
             }
             
-            // Check magic and version
-            ByteBuffer buf = ByteBuffer.wrap(received).order(ByteOrder.BIG_ENDIAN);
-            short magic = buf.getShort();
+            // Early validation: check magic number (bytes 0-1)
+            int magic = ((received[0] & 0xFF) << 8) | (received[1] & 0xFF);
             if (magic != UDP_MAGIC) {
-                continue; // Wrong magic
+                continue; // Wrong magic, skip
             }
             
-            byte version = buf.get();
+            // Early validation: check version (byte 2)
+            byte version = received[2];
             if (version != UDP_VERSION) {
-                continue; // Wrong version
+                continue; // Wrong version, skip
             }
             
-            byte flags = buf.get();
+            // Early validation: check flags (must be response) (byte 3)
+            byte flags = received[3];
             if (flags != UDP_FLAG_RESPONSE) {
-                continue; // Not a response
+                continue; // Not a response, skip
             }
             
-            int recvReqID = buf.getInt();
+            // Extract request ID (bytes 4-7) - big-endian
+            int recvReqID = ((received[4] & 0xFF) << 24) |
+                           ((received[5] & 0xFF) << 16) |
+                           ((received[6] & 0xFF) << 8) |
+                           (received[7] & 0xFF);
+            
+            // Check request ID match (convert both to int for comparison)
             if (recvReqID != (int) reqID) {
-                continue; // Wrong request ID
+                continue; // Wrong request ID, continue waiting
             }
             
-            // Check if single datagram or fragment
+            // Got the right response! Now parse it
+            // Check if it's a single datagram (byte 8 is status) or fragment (bytes 8-9 are seq_no)
             // Single datagram: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][STATUS:1][DATA:...]
             // Fragment: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][SEQ:2][FRAG_COUNT:2][PAYLOAD_LEN:2][DATA:...]
-            // After reading flags and requestID, we're at position 8
-            // For single datagram, byte 8 is status (0x00-0x02)
-            // For fragment, bytes 8-9 are seq_no (could be 0-65535)
+            // For single datagram, byte 8 is the status (0x00-0x02)
+            // For fragments, bytes 8-9 are seq_no (u16), which could be 0-65535
+            // If byte 8 is <= 0x02, it's likely a status byte (single datagram)
             
             if (received.length < UDP_SINGLE_HEADER_LEN) {
                 continue; // Too short for single datagram
@@ -379,28 +432,38 @@ public class UDPClient implements AutoCloseable {
             
             // If byte 8 is <= 0x02 and we have enough bytes, it's likely a single datagram
             // (status codes are 0x00, 0x01, 0x02)
+            // For PING, response is exactly 9 bytes (header only, no data)
             if (byte8 <= 0x02 && received.length >= UDP_SINGLE_HEADER_LEN) {
                 // Single datagram response
                 byte status = byte8;
-                byte[] data = Arrays.copyOfRange(received, UDP_SINGLE_HEADER_LEN, received.length);
+                byte[] data;
+                if (received.length > UDP_SINGLE_HEADER_LEN) {
+                    data = Arrays.copyOfRange(received, UDP_SINGLE_HEADER_LEN, received.length);
+                } else {
+                    data = new byte[0]; // No data (e.g., PING response is exactly 9 bytes)
+                }
                 
-                // Prepend status byte for consistency
+                // Prepend status byte for consistency with TCP client's decodeResponse
                 byte[] response = new byte[1 + data.length];
                 response[0] = status;
-                System.arraycopy(data, 0, response, 1, data.length);
+                if (data.length > 0) {
+                    System.arraycopy(data, 0, response, 1, data.length);
+                }
                 
                 return response;
             } else if (received.length >= UDP_HEADER_LEN) {
                 // Likely fragment - decode fragment header
-                buf.position(8); // Reset to after requestID
-                short seqNo = buf.getShort();
-                short fragCount = buf.getShort();
+                // Fragment format: [MAGIC:2][VERSION:1][FLAGS:1][REQUEST_ID:4][SEQ:2][FRAG_COUNT:2][PAYLOAD_LEN:2][DATA:...]
+                // Bytes 8-9: seq_no (u16)
+                // Bytes 10-11: frag_count (u16)
+                // Bytes 12-13: payload_len (u16)
+                short seqNo = (short) (((received[8] & 0xFF) << 8) | (received[9] & 0xFF));
+                short fragCount = (short) (((received[10] & 0xFF) << 8) | (received[11] & 0xFF));
                 
                 if (fragCount > 0 && seqNo < fragCount) {
-                    short payloadLen = buf.getShort();
+                    short payloadLen = (short) (((received[12] & 0xFF) << 8) | (received[13] & 0xFF));
                     if (payloadLen > 0 && received.length >= UDP_HEADER_LEN + payloadLen) {
-                        byte[] payload = new byte[payloadLen];
-                        buf.get(payload);
+                        byte[] payload = Arrays.copyOfRange(received, UDP_HEADER_LEN, UDP_HEADER_LEN + payloadLen);
                         
                         if (reassembly == null) {
                             reassembly = new ReassemblyState();
