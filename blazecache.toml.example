@@ -1,0 +1,65 @@
+# BlazeCache Configuration File
+# 
+# Configuration precedence (highest to lowest):
+# 1. Command-line arguments
+# 2. Environment variables
+# 3. Configuration file (this file)
+# 4. Built-in defaults
+
+[server]
+# Port to listen on (default: 6784)
+# port = 6784
+
+# Memory limit in MB (default: 64)
+# memory = 512
+
+# Run as daemon (default: false)
+# daemon = false
+
+[persistence]
+# Enable persistence/WAL (default: false)
+# enabled = true
+
+# Data directory for persistence files (default: ./cache_data)
+# data_dir = "./cache_data"
+
+# Snapshot interval in seconds (default: 300)
+# snapshot_interval = 300
+
+# Disable WAL, use snapshots only (default: false)
+# wal_disabled = false
+
+# Max WAL size before rotation in MB (default: 100)
+# wal_max_mb = 100
+
+# Disable snapshot compression (default: false)
+# no_compress_snapshots = false
+
+[gossip]
+# Enable gossip protocol (default: false)
+# enabled = true
+
+# Gossip UDP port (default: server_port + 1)
+# port = 6785
+
+# Gossip interval in seconds (default: 1)
+# interval = 1
+
+# Number of peers to contact per round (default: 3)
+# fanout = 3
+
+
+# Time before marking peer inactive in seconds (default: 15)
+# suspicion_timeout = 15
+
+# Time before marking peer failed in seconds (default: 30)
+# failure_timeout = 30
+
+# Failure check interval in seconds (default: 5)
+# failure_check_interval = 5
+
+[logging]
+# Log level: trace, debug, info, warn, error (default: info)
+# Note: RUST_LOG environment variable takes precedence over this
+# level = "info"
+
